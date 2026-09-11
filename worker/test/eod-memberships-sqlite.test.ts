@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadEodMemberships } from "../src/eod";
+import { assessEodMembershipEvidence } from "../src/eod-membership-evidence";
 import type { Env } from "../src/types";
 import { createSqliteD1 } from "./helpers/sqlite-d1";
 
@@ -9,7 +10,7 @@ describe("scoped historical membership reads against real SQLite", { timeout: 20
     market = createSqliteD1(); ops = createSqliteD1();
     market.migrate("market-data-migrations"); ops.migrate("ops-migrations");
   }, 30_000);
-  afterEach(() => { market.dispose(); ops.dispose(); });
+  afterEach(() => { market.dispose(); ops.dispose(); vi.useRealTimers(); });
 
   it("loads all five complete populations while excluding future and unrelated versions", async () => {
     const populations = [["sp500-core", 500], ["nasdaq-core", 2500], ["nyse-core", 1500],
@@ -66,8 +67,43 @@ describe("scoped historical membership reads against real SQLite", { timeout: 20
     await market.db.prepare("UPDATE universe_versions SET status='superseded' WHERE id='late-evening'").run();
     await ops.db.prepare("UPDATE universe_source_sync_state SET source_as_of_date='2026-09-09',last_verified_at='2026-09-09 04:00:00'").run();
     expect((await loadEodMemberships(env, "2026-09-08"))[0]).toMatchObject({
-      versionId: "late-evening", sourceAsOfDate: "2026-09-08", verifiedAt: null,
+      versionId: "late-evening", sourceAsOfDate: null, verifiedAt: "2026-09-09 00:15:00",
     });
-    expect((await loadEodMemberships(env, "2026-09-09"))[0]).toMatchObject({ versionId: "next-day", sourceAsOfDate: "2026-09-09" });
+    expect((await loadEodMemberships(env, "2026-09-09"))[0]).toMatchObject({ versionId: "next-day", sourceAsOfDate: null });
+  });
+
+  it("uses a real dated issuer snapshot collected later while retaining the earlier verified S&P observation", async () => {
+    vi.useFakeTimers({toFake:["Date"]});vi.setSystemTime(new Date("2026-09-11T06:00:00Z"));
+    const insert = async (universe:string,id:string,type:string,date:string|null,observed:string,count:number,status="active") => {
+      await market.db.prepare("INSERT OR IGNORE INTO universes(id,name,active_version_id) VALUES(?,?,?)").bind(universe,universe,id).run();
+      await market.db.prepare(`INSERT INTO universe_versions(id,universe_id,source,source_type,source_as_of_date,status,member_count,created_at,promoted_at)
+        VALUES(?,?,'verified source',?,?,?,?,?,?)`).bind(id,universe,type,date,status,count,observed,observed).run();
+      await market.db.prepare("INSERT INTO universe_version_members(version_id,ticker) SELECT ?,value FROM json_each(?)")
+        .bind(id,JSON.stringify(Array.from({length:count},(_,i)=>`T${i}`))).run();
+    };
+    await insert("sp500-core","sp-sep09","wikipedia-derived-public-proxy","2026-09-09","2026-09-09 12:43:47",503,"superseded");
+    await insert("sp500-core","sp-sep11","wikipedia-derived-public-proxy",null,"2026-09-11 05:48:27",503);
+    await market.db.prepare("UPDATE universes SET active_version_id='sp-sep11' WHERE id='sp500-core'").run();
+    await insert("russell2000-core","iwm-sep09","official-etf-holdings-proxy","2026-09-09","2026-09-11 05:48:27",1949);
+    await ops.db.prepare(`INSERT INTO universe_source_sync_state(source_key,status,source_label,source_type,source_as_of_date,last_verified_at)
+      VALUES('universe:sp500-core','ok','newly observed proxy','wikipedia-derived-public-proxy',NULL,'2026-09-11 05:48:27'),
+        ('universe:russell2000-core','ok','issuer-dated set','official-etf-holdings-proxy','2026-09-09','2026-09-11 05:48:27')`).run();
+    const env={DB:market.db,MARKET_DATA_DB:market.db,OPS_DB:ops.db} as Env;
+    const memberships=await loadEodMemberships(env,"2026-09-10"),sp=memberships.find(row=>row.universeId==="sp500-core")!,
+      iwm=memberships.find(row=>row.universeId==="russell2000-core")!;
+    expect(sp).toMatchObject({versionId:"sp-sep09",sourceAsOfDate:null,verifiedAt:"2026-09-09 12:43:47"});
+    expect(iwm).toMatchObject({versionId:"iwm-sep09",sourceAsOfDate:"2026-09-09",verifiedAt:"2026-09-11 05:48:27"});
+    const calendar=["2026-09-02","2026-09-03","2026-09-04","2026-09-08","2026-09-09","2026-09-10"];
+    for(const member of [sp,iwm])expect(assessEodMembershipEvidence(member,"2026-09-10",calendar))
+      .toMatchObject({publishable:true,ageSessions:1,degraded:true});
+    expect(await market.db.prepare("SELECT source_as_of_date AS date,promoted_at AS observed FROM universe_versions WHERE id='sp-sep09'").first())
+      .toEqual({date:"2026-09-09",observed:"2026-09-09 12:43:47"});
+
+    // A future effective set cannot displace the eligible issuer snapshot.
+    await insert("russell2000-core","iwm-future","official-etf-holdings-proxy","2026-09-11","2026-09-11 05:48:27",1949);
+    await market.db.prepare("UPDATE universes SET active_version_id='iwm-future' WHERE id='russell2000-core'").run();
+    expect((await loadEodMemberships(env,"2026-09-10")).find(row=>row.universeId==="russell2000-core")?.versionId).toBe("iwm-sep09");
+    await market.db.prepare("UPDATE universe_versions SET status='rejected' WHERE id='sp-sep09'").run();
+    expect((await loadEodMemberships(env,"2026-09-10")).find(row=>row.universeId==="sp500-core")).toBeUndefined();
   });
 });

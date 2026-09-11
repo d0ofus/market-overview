@@ -145,7 +145,7 @@ import {
   type CronJobField,
   type CronJobValues,
 } from "./cron-jobs-service";
-import { normalizeEtfSyncStatusRow, type EtfSyncStatusRow } from "./etf-sync-status";
+import { loadEtfSyncStatus, normalizeEtfSyncStatusRow, type EtfSyncStatusRow } from "./etf-sync-status";
 import {
   cleanupOldAlertsData,
   ingestTradingViewAlertEmailsBatch,
@@ -997,51 +997,6 @@ async function loadEtfSourceUrl(env: Env, ticker: string): Promise<string | null
     return row?.sourceUrl?.trim() || null;
   } catch {
     return null;
-  }
-}
-
-async function loadEtfSyncStatus(
-  env: Env,
-  ticker: string,
-  fallback?: { actualRecordsCount?: number | null; latestConstituentUpdatedAt?: string | null },
-): Promise<EtfSyncStatusRow | null> {
-  const withFallback = (row: EtfSyncStatusRow | null): EtfSyncStatusRow | null => {
-    if (row) {
-      return normalizeEtfSyncStatusRow({
-        ...row,
-        actualRecordsCount: row.actualRecordsCount ?? fallback?.actualRecordsCount ?? null,
-        latestConstituentUpdatedAt: row.latestConstituentUpdatedAt ?? fallback?.latestConstituentUpdatedAt ?? null,
-      });
-    }
-    const fallbackCount = Number(fallback?.actualRecordsCount ?? 0);
-    if (fallbackCount <= 0) return null;
-    return normalizeEtfSyncStatusRow({
-      etfTicker: ticker,
-      lastSyncedAt: fallback?.latestConstituentUpdatedAt ?? null,
-      status: null,
-      error: null,
-      source: null,
-      recordsCount: fallbackCount,
-      updatedAt: fallback?.latestConstituentUpdatedAt ?? null,
-      actualRecordsCount: fallbackCount,
-      latestConstituentUpdatedAt: fallback?.latestConstituentUpdatedAt ?? null,
-    });
-  };
-
-  try {
-    const row = await env.DB.prepare(
-      "SELECT s.etf_ticker as etfTicker, s.last_synced_at as lastSyncedAt, s.status, s.error, s.source, s.records_count as recordsCount, s.updated_at as updatedAt, s.coverage as coverage, s.source_tier as sourceTier, s.source_url as sourceUrl, s.provider_records_count as providerRecordsCount, s.expected_min_records as expectedMinRecords, s.last_full_synced_at as lastFullSyncedAt, s.last_partial_synced_at as lastPartialSyncedAt, COALESCE(cs.actualRecordsCount, 0) as actualRecordsCount, cs.latestConstituentUpdatedAt as latestConstituentUpdatedAt FROM etf_constituent_sync_status s LEFT JOIN (SELECT etf_ticker as etfTicker, COUNT(*) as actualRecordsCount, MAX(updated_at) as latestConstituentUpdatedAt FROM etf_constituents GROUP BY etf_ticker) cs ON cs.etfTicker = s.etf_ticker WHERE s.etf_ticker = ?",
-    )
-      .bind(ticker)
-      .first<EtfSyncStatusRow>();
-    return withFallback(row ?? null);
-  } catch {
-    const row = await env.DB.prepare(
-      "SELECT s.etf_ticker as etfTicker, s.last_synced_at as lastSyncedAt, s.status, s.error, s.source, s.records_count as recordsCount, s.updated_at as updatedAt, COALESCE(cs.actualRecordsCount, 0) as actualRecordsCount, cs.latestConstituentUpdatedAt as latestConstituentUpdatedAt FROM etf_constituent_sync_status s LEFT JOIN (SELECT etf_ticker as etfTicker, COUNT(*) as actualRecordsCount, MAX(updated_at) as latestConstituentUpdatedAt FROM etf_constituents GROUP BY etf_ticker) cs ON cs.etfTicker = s.etf_ticker WHERE s.etf_ticker = ?",
-    )
-      .bind(ticker)
-      .first<EtfSyncStatusRow>();
-    return withFallback(row ?? null);
   }
 }
 
@@ -3754,7 +3709,7 @@ app.get("/api/etf/:ticker/constituents", async (c) => {
     .sort()
     .at(-1) ?? null;
 
-  const status = await loadEtfSyncStatus(c.env, ticker, {
+  const status = await loadEtfSyncStatus(c.env.DB, ticker, {
     actualRecordsCount: baseRows.length,
     latestConstituentUpdatedAt: latestBaseUpdatedAt,
   });
@@ -3773,7 +3728,10 @@ app.get("/api/etf/:ticker/constituents", async (c) => {
       barDate: stats?.barDate ?? null,
       priceSource: stats?.source ?? null,
       priceStatus: row.chartEligible ? (stats?.lastPrice == null ? stats?.unavailableReason ?? "unavailable" : "dated")
-        : row.assetType === "crypto" ? "crypto-asset-no-equity-quote" : "physical-asset-no-equity-quote",
+        : row.assetType === "crypto" ? "crypto-asset-no-equity-quote"
+        : row.assetType === "derivative" ? "derivative-asset-no-equity-quote"
+        : row.assetType === "money_market" ? "money-market-asset-no-equity-quote"
+        : row.assetType === "cash" ? "cash-asset-no-equity-quote" : "physical-asset-no-equity-quote",
     };
   });
   return c.json({
@@ -6700,7 +6658,7 @@ app.get("/api/admin/etf-sync-diagnostics", async (c) => {
   )
     .bind(ticker)
     .first<{ count: number; latestAsOfDate: string | null; latestUpdatedAt: string | null }>();
-  const syncStatus = await loadEtfSyncStatus(c.env, ticker, {
+  const syncStatus = await loadEtfSyncStatus(c.env.DB, ticker, {
     actualRecordsCount: constituentSummary?.count ?? 0,
     latestConstituentUpdatedAt: constituentSummary?.latestUpdatedAt ?? null,
   });

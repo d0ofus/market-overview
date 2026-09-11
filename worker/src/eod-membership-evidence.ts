@@ -23,6 +23,16 @@ export function isEodMembershipSourceVerified(universeId: string, sourceType: st
   return Boolean(sourceType && sources[universeId]?.includes(sourceType));
 }
 
+/** These feeds publish an explicit date for the exported constituent set.
+ * An undated S&P proxy is only evidence from when it was actually observed. */
+export function isDatedMembershipSource(sourceType: string | null | undefined): boolean {
+  return sourceType === "public-common-stock-proxy" || sourceType === "official-etf-holdings-proxy";
+}
+
+export function isUndatedSp500Source(sourceType: string | null | undefined): boolean {
+  return sourceType === "wikipedia-derived-public-proxy" || sourceType === "public-index-constituents-proxy";
+}
+
 /** SQLite CURRENT_TIMESTAMP is UTC; ISO timestamps must carry their offset.
  * Verification belongs to the New York civil day, including after UTC midnight. */
 export function membershipVerificationTime(value: string | null | undefined): number | null {
@@ -48,22 +58,31 @@ export function membershipSessionEndUtc(targetSession: string): string {
   return new Date(noon.getTime() + (12 * 60 - offsetMinutes) * 60_000).toISOString();
 }
 
-export function assessEodMembershipEvidence(membership: EodMembershipEvidence, targetSession: string, calendarDates: string[]): {
+export function assessEodMembershipEvidence(membership: EodMembershipEvidence, targetSession: string, calendarDates: string[], now = new Date()): {
   publishable: boolean; reason: string | null; ageSessions: number | null; degraded: boolean;
 } {
   const unavailable = (reason: string) => ({ publishable: false, reason, ageSessions: null, degraded: true });
   if (!membership.versionId || !isEodMembershipSourceVerified(membership.universeId, membership.sourceType)) {
     return unavailable("membership-source-unverified-or-unrelated");
   }
-  if (!validDate(membership.sourceAsOfDate) || membership.sourceAsOfDate > targetSession) {
+  const verifiedDate = membership.verifiedAt === null ? null : membershipVerificationDate(membership.verifiedAt);
+  if (membership.verifiedAt !== null && (membershipVerificationTime(membership.verifiedAt) ?? Infinity) > now.getTime()) {
+    return unavailable("membership-verification-invalid-or-future");
+  }
+  const observationOnly = membership.universeId === "sp500-core" && isUndatedSp500Source(membership.sourceType)
+    && membership.sourceAsOfDate === null;
+  if ((!observationOnly && !validDate(membership.sourceAsOfDate))
+    || (membership.sourceAsOfDate !== null && membership.sourceAsOfDate > targetSession)
+    || (observationOnly && (!verifiedDate || verifiedDate > targetSession))) {
     return unavailable("membership-source-date-unavailable-or-future");
   }
-  let evidenceDate = membership.sourceAsOfDate;
+  let evidenceDate = membership.sourceAsOfDate ?? verifiedDate!;
   if (membership.verifiedAt !== null) {
-    const verifiedDate = membershipVerificationDate(membership.verifiedAt);
-    if (!verifiedDate || verifiedDate > targetSession
-      || verifiedDate < membership.sourceAsOfDate) return unavailable("membership-verification-invalid-or-future");
-    evidenceDate = verifiedDate;
+    if (!verifiedDate || (verifiedDate > targetSession && !isDatedMembershipSource(membership.sourceType))
+      || (membership.sourceAsOfDate !== null && verifiedDate < membership.sourceAsOfDate)) return unavailable("membership-verification-invalid-or-future");
+    // A later collection of an explicitly dated file supports that dated set;
+    // it cannot erase the set's historical age or invent earlier verification.
+    if (verifiedDate <= targetSession) evidenceDate = verifiedDate;
   }
   if (!validDate(targetSession) || calendarDates.at(-1) !== targetSession
     || calendarDates.some((date, index) => !validDate(date) || (index > 0 && calendarDates[index - 1]! >= date))

@@ -25,11 +25,11 @@ describe("membership provider request boundaries", () => {
       expect(meteredFetchWithRetry).toHaveBeenCalledTimes(2);
     },
   );
-  it("dates a verified S&P current list in New York after UTC midnight", async () => {
+  it("keeps the S&P proxy's unknown source date separate from its actual collection timestamp", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-11T00:15:00Z"));
     const csv = ["Symbol,Security", ...Array.from({ length: 500 }, (_, index) => `T${index},Member ${index}`)].join("\n");
     vi.mocked(meteredFetchWithRetry).mockResolvedValue(new Response(csv));
-    expect((await loadSp500Universe(undefined, {} as Env)).sourceAsOfDate).toBe("2026-09-10");
+    expect(await loadSp500Universe(undefined, {} as Env)).toMatchObject({sourceAsOfDate:null,verifiedAt:"2026-09-11T00:15:00.000Z"});
   });
 });

@@ -1,7 +1,6 @@
 import { SP500_TICKERS } from "./sp500-tickers";
 import { meteredFetchWithRetry, ProviderRequestFailureError, ProviderBudgetExceededError } from "./provider-usage";
 import { isMembershipInfrastructureFailure } from "./membership-source-policy";
-import { zonedParts } from "./refresh-timing";
 import type { Env } from "./types";
 
 export const NASDAQ_TRADER_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt";
@@ -18,7 +17,6 @@ const BANNED_NAME_REGEXES = [
   /\betns?\b/i,
   /\brights?\b/i,
   /\bnotes?\b/i,
-  /\bpar value\b/i,
   /\bfixed-rate\b/i,
   /\bfixed-income\b/i,
 ];
@@ -266,6 +264,7 @@ export function parseIsharesHoldingsCsv(raw: string): string[] {
 
 export type IsharesHolding = {
   sourceTicker: string;
+  canonicalTicker?: string;
   issuerName: string | null;
   exchange: string | null;
   assetClass: string;
@@ -300,11 +299,12 @@ function parseIsharesAsOfDate(lines: string[]): string | null {
   return null;
 }
 
-function parseCsvNumber(raw: string): number | null {
-  const normalized = raw.replace(/,/g, "").trim();
-  if (!normalized || normalized === "-") return null;
-  const value = Number(normalized);
-  return Number.isFinite(value) ? value : null;
+function normalizeIsharesTicker(raw: string, name: string): string {
+  // The issuer uses "MOG A"/"GEF B" for listed class shares. Require matching
+  // security-name evidence before mapping a space suffix to provider notation.
+  const classShare = /^([A-Z][A-Z0-9]{0,7})\s+([A-Z])$/.exec(raw);
+  return classShare && new RegExp(`\\bCLASS[ -]+${classShare[2]}\\b`, "i").test(name)
+    ? `${classShare[1]}.${classShare[2]}` : normalizeTicker(raw);
 }
 
 export function parseIsharesHoldingsCsvDetailed(raw: string): IsharesHoldingsParseResult {
@@ -324,7 +324,6 @@ export function parseIsharesHoldingsCsvDetailed(raw: string): IsharesHoldingsPar
   }
   const nameIndex = header.indexOf("name");
   const exchangeIndex = header.indexOf("exchange");
-  const priceIndex = header.indexOf("price");
   const seenRawTickers = new Set<string>();
   let sourceEquityCount = 0;
   let duplicateTickerCount = 0;
@@ -345,9 +344,9 @@ export function parseIsharesHoldingsCsvDetailed(raw: string): IsharesHoldingsPar
       duplicateSourceIdentifiers.push(rawTicker);
     }
     if (rawTicker) seenRawTickers.add(rawTicker);
-    const ticker = normalizeTicker(rawTicker);
     const sourceKey = rawTicker || `(blank row ${headerIndex + rowOffset + 2})`;
     const name = (cells[nameIndex] ?? "").trim();
+    const ticker = normalizeIsharesTicker(rawTicker, name);
     const exchange = (cells[exchangeIndex] ?? "").trim().toLowerCase();
     const nonMarket = exchange.includes("no market") || exchange.includes("non-nms") || exchange.includes("unlisted");
     // Issuer exports use "-" for unlisted CVRs/private vesting positions. These
@@ -361,15 +360,17 @@ export function parseIsharesHoldingsCsvDetailed(raw: string): IsharesHoldingsPar
       invalidSourceIdentifiers.push(sourceKey);
       continue;
     }
-    const price = priceIndex >= 0 ? parseCsvNumber(cells[priceIndex] ?? "") : null;
-    const residual = /\b(?:cvr|escrow)\b/i.test(name) || (priceIndex >= 0 && (price == null || price <= 0));
+    // A missing/zero issuer quote is not evidence that a listed equity ceased
+    // to be a member. "CVR ENERGY INC" is a company, not a contingent-value right.
+    const residual = /\b(?:cvr|escrow)\s*$/i.test(name) || /\bcontingent value rights?\b/i.test(name);
     if (residual) {
       excludedSourceIdentifiers.push(`residual:${rawTicker}`);
       continue;
     }
     if (!holdingsByTicker.has(ticker)) {
       holdingsByTicker.set(ticker, {
-        sourceTicker: ticker,
+        sourceTicker: rawTicker,
+        ...(ticker !== rawTicker ? { canonicalTicker: ticker } : {}),
         issuerName: name || null,
         exchange: (cells[exchangeIndex] ?? "").trim() || null,
         assetClass: "Equity",
@@ -377,7 +378,7 @@ export function parseIsharesHoldingsCsvDetailed(raw: string): IsharesHoldingsPar
     }
   }
   const holdings = Array.from(holdingsByTicker.values()).sort((a, b) => a.sourceTicker.localeCompare(b.sourceTicker));
-  const resolvedTickers = holdings.map((holding) => holding.sourceTicker);
+  const resolvedTickers = holdings.map((holding) => holding.canonicalTicker ?? holding.sourceTicker).sort();
   return {
     sourceAsOfDate: parseIsharesAsOfDate(lines),
     sourceEquityCount,
@@ -421,6 +422,7 @@ export type Sp500UniverseLoad = {
   contentHash: string;
   etag: string | null;
   lastModified: string | null;
+  verifiedAt?: string;
 };
 
 export async function loadSp500Universe(allCommonUniverse?: Set<string>, env?: Env): Promise<Sp500UniverseLoad> {
@@ -434,9 +436,10 @@ export async function loadSp500Universe(allCommonUniverse?: Set<string>, env?: E
       const tickers = parsed;
       return {
         tickers,
-        // This proxy has no constituent effective-date field. This is the date
-        // its current contents were verified; Last-Modified remains separate.
-        sourceAsOfDate: zonedParts(new Date(), "America/New_York").localDate,
+        // The public proxy has no constituent effective-date field. A download
+        // observed tomorrow must not be relabelled as yesterday's membership.
+        sourceAsOfDate: null,
+        verifiedAt: new Date().toISOString(),
         sourceType: "wikipedia-derived-public-proxy",
         sourceUrl: SP500_CSV_URL,
         contentHash: await sha256Text(raw),
@@ -536,7 +539,7 @@ export async function loadRussell2000Universe(allCommonUniverse?: Set<string>, e
     tickers = resolved;
   }
   const memberMetadata = Object.fromEntries(parsed.holdings.flatMap((holding) => {
-    const providerTicker = sourceToProvider.get(holding.sourceTicker);
+    const providerTicker = sourceToProvider.get(holding.canonicalTicker ?? holding.sourceTicker);
     return providerTicker ? [[providerTicker, holding] as const] : [];
   }));
   return {

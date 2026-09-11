@@ -34,6 +34,22 @@ describe("universe constituent parsers", () => {
     expect(parseNasdaqTraderFileCreationDate(sample)).toBe("2026-03-04");
   });
 
+  it("retains the five actual common-share par-value rows while honoring ETF/test and non-common security flags", () => {
+    const common = [
+      ["AVD","American Vanguard Corporation Common Stock ($0.10 Par Value)"],
+      ["CMRE","Costamare Inc. Common Stock $0.0001 par value"],
+      ["FVRR","Fiverr International Ltd. Ordinary Shares, no par value"],
+      ["GDOT","Green Dot Corporation Class A Common Stock, $0.001 par value"],
+      ["SB","Safe Bulkers, Inc Common Stock ($0.001 par value)"],
+    ];
+    const sample = [...common.map(([ticker,name])=>`Y|${ticker}|${name}|N||N|100|N||${ticker}|${ticker}|N`),
+      "Y|PREF|Example Preferred Shares $0.01 par value|N||N|100|N||PREF|PREF|N",
+      "Y|WAR|Example Warrants to buy Common Stock par value|N||N|100|N||WAR|WAR|N",
+      "Y|ETF|Example Common Stock ETF|N||Y|100|N||ETF|ETF|N",
+      "Y|TEST|Example Common Stock no par value|N||N|100|Y||TEST|TEST|N"].join("\n");
+    expect(parseNasdaqTradedCommonStocks(sample).map(row=>row.symbol)).toEqual(common.map(([ticker])=>ticker));
+  });
+
   it("fails closed when NasdaqTrader File Creation Time is absent or malformed", () => {
     expect(parseNasdaqTraderFileCreationDate("Nasdaq Traded|Symbol\nY|AAPL")).toBeNull();
     expect(parseNasdaqTraderFileCreationDate("File Creation Time: tomorrow")).toBeNull();
@@ -118,7 +134,7 @@ describe("universe constituent parsers", () => {
     expect(parseIsharesHoldingsCsv(csv)).toEqual(["AA", "BRK.B"]);
   });
 
-  it("preserves IWM provenance and excludes non-market residual positions", () => {
+  it("preserves IWM provenance and retains unpriced listed equities", () => {
     const csv = [
       "iShares Russell 2000 ETF",
       "Fund Holdings as of,Jul 20, 2026",
@@ -137,13 +153,35 @@ describe("universe constituent parsers", () => {
       sourceEquityCount: 6,
       duplicateTickerCount: 1,
       blankTickerCount: 1,
-      tickers: ["AA"],
-      excludedCount: 5,
-      holdings: [{ sourceTicker: "AA", issuerName: "ALCOA CORP", exchange: "NYSE", assetClass: "Equity" }],
+      tickers: ["AA", "PDLI"],
+      excludedCount: 4,
+      holdings: [{ sourceTicker: "AA", issuerName: "ALCOA CORP", exchange: "NYSE", assetClass: "Equity" },
+        { sourceTicker: "PDLI", issuerName: "PDL BIOPHARMA INC", exchange: "NASDAQ", assetClass: "Equity" }],
       invalidSourceIdentifiers: ["(blank row 9)", "BAD/ID"],
       duplicateSourceIdentifiers: ["AA"],
-      excludedSourceIdentifiers: ["non-market:INH", "residual:PDLI"],
+      excludedSourceIdentifiers: ["non-market:INH"],
     });
+  });
+
+  it("maps the four live issuer class-share aliases while preserving source identifiers and unpriced equities", async () => {
+    const csv=["iShares Russell 2000 ETF",'Fund Holdings as of,"Sep 09, 2026"',
+      "Ticker,Name,Asset Class,Price,Exchange",
+      "BH A,BIGLARI HOLDINGS INC CLASS A,Equity,1808.74,NYSE",
+      "CRD A,CRAWFORD CLASS A,Equity,12.79,NYSE",
+      "GEF B,GREIF INC CLASS B,Equity,107.04,NYSE",
+      "MOG A,MOOG INC CLASS A,Equity,367.51,NYSE",
+      "CVI,CVR ENERGY INC,Equity,0.00,NYSE",
+      "PDLI,PDL BIOPHARMA INC,Equity,-,NASDAQ",
+      "CVRIGHT,EXAMPLE INC CVR,Equity,1.00,NYSE",
+      "USD,USD CASH,Cash,1.00,-"].join("\n");
+    expect(parseIsharesHoldingsCsvDetailed(csv)).toMatchObject({sourceAsOfDate:"2026-09-09",sourceEquityCount:7,
+      tickers:["BH.A","CRD.A","CVI","GEF.B","MOG.A","PDLI"],invalidSourceIdentifiers:[],excludedSourceIdentifiers:["residual:CVRIGHT"]});
+    vi.stubGlobal("fetch",vi.fn().mockResolvedValue(new Response(csv)));
+    const result=await loadRussell2000Universe(new Set(["BH.A","CRD.A","CVI","GEF.B","MOG.A"]));
+    expect(result.memberMetadata["MOG.A"]).toMatchObject({sourceTicker:"MOG A",canonicalTicker:"MOG.A",issuerName:"MOOG INC CLASS A"});
+    expect(result.tickers).toContain("PDLI");expect(result.unresolvedTickers).toContain("PDLI");
+    expect(result.normalizedMemberCount).toBe(6);
+    expect(parseIsharesHoldingsCsvDetailed(csv.replace("MOOG INC CLASS A","UNEXPLAINED SECURITY")).invalidSourceIdentifiers).toEqual(["MOG A"]);
   });
 
   it("accepts a production-shaped IWM membership and discovers only same-origin CSV links", () => {

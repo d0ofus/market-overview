@@ -1,0 +1,158 @@
+{
+  "sourceUrl": "https://www.ssga.com/library-content/products/fund-data/etfs/us/holdings-daily-us-en-xlc.xlsx",
+  "observedAt": "2026-09-11",
+  "rows": [
+    [
+      "Fund Name:",
+      "State Street® Communication Services Select Sector SPDR® ETF"
+    ],
+    [
+      "Ticker Symbol:",
+      "XLC"
+    ],
+    [
+      "Holdings:",
+      "As of 09-Sep-2026"
+    ],
+    [
+      "Name",
+      "Ticker",
+      "Weight"
+    ],
+    [
+      "META PLATFORMS INC CLASS A",
+      "META",
+      "19.304126"
+    ],
+    [
+      "ALPHABET INC CL A",
+      "GOOGL",
+      "10.114541"
+    ],
+    [
+      "ALPHABET INC CL C",
+      "GOOG",
+      "8.096816"
+    ],
+    [
+      "AT+T INC",
+      "T",
+      "5.141634"
+    ],
+    [
+      "VERIZON COMMUNICATIONS INC",
+      "VZ",
+      "5.031348"
+    ],
+    [
+      "WALT DISNEY CO/THE",
+      "DIS",
+      "4.711864"
+    ],
+    [
+      "NETFLIX INC",
+      "NFLX",
+      "4.596886"
+    ],
+    [
+      "WARNER BROS DISCOVERY INC",
+      "WBD",
+      "4.589100"
+    ],
+    [
+      "T MOBILE US INC",
+      "TMUS",
+      "4.547247"
+    ],
+    [
+      "COMCAST CORP CLASS A",
+      "CMCSA",
+      "4.528995"
+    ],
+    [
+      "LIVE NATION ENTERTAINMENT IN",
+      "LYV",
+      "4.153699"
+    ],
+    [
+      "OMNICOM GROUP",
+      "OMC",
+      "4.092321"
+    ],
+    [
+      "TAKE TWO INTERACTIVE SOFTWRE",
+      "TTWO",
+      "3.810951"
+    ],
+    [
+      "CHARTER COMMUNICATIONS INC A",
+      "CHTR",
+      "2.810255"
+    ],
+    [
+      "FOX CORP   CLASS A",
+      "FOXA",
+      "2.336067"
+    ],
+    [
+      "ECHOSTAR CORP A",
+      "ECHO",
+      "2.282166"
+    ],
+    [
+      "TKO GROUP HOLDINGS INC",
+      "TKO",
+      "2.206638"
+    ],
+    [
+      "NEWS CORP   CLASS A",
+      "NWSA",
+      "1.981343"
+    ],
+    [
+      "FOX CORP   CLASS B",
+      "FOX",
+      "1.455923"
+    ],
+    [
+      "APPLOVIN CORP CLASS A",
+      "APP",
+      "1.303784"
+    ],
+    [
+      "TRADE DESK INC/THE  CLASS A",
+      "TTD",
+      "1.086852"
+    ],
+    [
+      "NEWS CORP   CLASS B",
+      "NWS",
+      "0.730889"
+    ],
+    [
+      "PARAMOUNT SKYDANCE CL B",
+      "PSKY",
+      "0.591151"
+    ],
+    [
+      "REDDIT INC CL A",
+      "RDDT",
+      "0.303849"
+    ],
+    [
+      "SSI US GOV MONEY MARKET CLASS",
+      "-",
+      "0.131309"
+    ],
+    [
+      "US DOLLAR",
+      "-",
+      "0.040195"
+    ],
+    [
+      "S+P EMINI COM SER SEP26",
+      "XASU6",
+      "-0.003524"
+    ]
+  ]
+}

@@ -12,7 +12,7 @@ import { getMarketDataDb, marketDataFeed } from "./market-data-db";
 import { loadMarketHistory } from "./market-history";
 import { getOpsDb } from "./ops-db";
 import { isMembershipInfrastructureFailure, membershipRetryNotBefore } from "./membership-source-policy";
-import { isEodMembershipSourceVerified, membershipSessionEndUtc, membershipVerificationDate, membershipVerificationTime } from "./eod-membership-evidence";
+import { isDatedMembershipSource, isUndatedSp500Source, isEodMembershipSourceVerified, membershipSessionEndUtc, membershipVerificationDate, membershipVerificationTime } from "./eod-membership-evidence";
 import {
   aggregateDailyMarketFeatures,
   computeAndStoreDailyMarketFeatures,
@@ -934,7 +934,8 @@ async function saveUniverseSourceStatus(
          source_label = excluded.source_label,
          source_type = COALESCE(excluded.source_type, universe_source_sync_state.source_type),
          source_url = COALESCE(excluded.source_url, universe_source_sync_state.source_url),
-         source_as_of_date = COALESCE(excluded.source_as_of_date, universe_source_sync_state.source_as_of_date),
+         source_as_of_date = CASE WHEN excluded.status = 'ok' AND excluded.source_type <> 'bundled-fallback'
+           THEN excluded.source_as_of_date ELSE universe_source_sync_state.source_as_of_date END,
          content_hash = COALESCE(excluded.content_hash, universe_source_sync_state.content_hash),
          etag = COALESCE(excluded.etag, universe_source_sync_state.etag),
          last_modified = COALESCE(excluded.last_modified, universe_source_sync_state.last_modified),
@@ -1074,6 +1075,7 @@ export function shouldRefreshUniverseSource(input: {
   nextAttemptAt: string | null | undefined;
   refreshAfterDays: number;
   verifiedAt?: string | null;
+  sourceType?: string | null;
   now?: Date;
 }): boolean {
   const now = input.now ?? new Date();
@@ -1083,10 +1085,11 @@ export function shouldRefreshUniverseSource(input: {
   // Source dates and verification dates have different meanings: yesterday's
   // dated issuer file can be today's successfully verified membership.
   const verified = membershipVerificationTime(input.verifiedAt);
+  const evidenceDate = input.sourceAsOfDate ?? (isUndatedSp500Source(input.sourceType) ? membershipVerificationDate(input.verifiedAt) : null);
   if (verified !== null && verified <= now.getTime()
     && membershipVerificationDate(input.verifiedAt) === membershipVerificationDate(now.toISOString())
-    && input.sourceAsOfDate && businessDaysAfter(input.sourceAsOfDate, now) <= 5) return false;
-  return universeSourceAgeDays(input.sourceAsOfDate, now) >= input.refreshAfterDays;
+    && evidenceDate && businessDaysAfter(evidenceDate, now) <= 5) return false;
+  return universeSourceAgeDays(evidenceDate, now) >= input.refreshAfterDays;
 }
 
 async function syncUniverseFromSource(
@@ -1099,17 +1102,20 @@ async function syncUniverseFromSource(
   const existing = await loadUniverseTickers(env, def.id);
   const status = await loadUniverseSourceStatus(env, def.sourceKey);
   const membershipIncomplete = def.id === "russell2000-core" && (existing.length < 1_800 || existing.length > 2_100);
-  const cachedAge = status?.sourceAsOfDate ? businessDaysAfter(status.sourceAsOfDate) : Number.POSITIVE_INFINITY;
+  const cachedEvidenceDate = status?.sourceAsOfDate
+    ?? (isUndatedSp500Source(status?.sourceType) ? membershipVerificationDate(status?.lastVerifiedAt) : null);
+  const cachedAge = cachedEvidenceDate ? businessDaysAfter(cachedEvidenceDate) : Number.POSITIVE_INFINITY;
   const currentDate = membershipVerificationDate(new Date().toISOString())!;
   const cachedMembershipUsable = existing.length > 0 && !membershipIncomplete
     && isEodMembershipSourceVerified(def.id, status?.sourceType)
-    && Boolean(status?.sourceAsOfDate && status.sourceAsOfDate <= currentDate)
+    && Boolean(cachedEvidenceDate && cachedEvidenceDate <= currentDate)
     && cachedAge <= 5;
   const shouldRefresh = shouldRefreshUniverseSource({
     existingCount: existing.length,
     membershipIncomplete: membershipIncomplete || !cachedMembershipUsable,
     status: status?.status,
     sourceAsOfDate: status?.sourceAsOfDate,
+    sourceType: status?.sourceType,
     nextAttemptAt: status?.nextAttemptAt,
     refreshAfterDays: def.refreshAfterDays ?? def.staleAfterDays,
     verifiedAt: isEodMembershipSourceVerified(def.id, status?.sourceType) ? status?.lastVerifiedAt : null,
@@ -1216,7 +1222,9 @@ async function loadCachedBreadthUniverseMemberships(env: Env): Promise<BreadthUn
     }
     const sourceKey = universeId === "overall-market-proxy" ? "universe:overall-market-core" : `universe:${universeId}`;
     const verification = await loadUniverseSourceStatus(env, sourceKey);
-    const sourceAsOfDate = verification?.sourceAsOfDate ?? version.sourceAsOfDate;
+    const sourceAsOfDate = verification?.sourceAsOfDate
+      ?? (isUndatedSp500Source(verification?.sourceType) ? membershipVerificationDate(verification?.lastVerifiedAt) : null)
+      ?? version.sourceAsOfDate;
     const sourceMs = sourceAsOfDate ? Date.parse(`${sourceAsOfDate}T00:00:00Z`) : Number.NaN;
     const ageDays = Number.isFinite(sourceMs) ? Math.floor((Date.now() - sourceMs) / 86_400_000) : Number.POSITIVE_INFINITY;
     const maxAgeDays = 5;
@@ -1428,7 +1436,8 @@ export async function loadEodMemberships(env: Env, targetSession: string): Promi
   };
   const verifiedTime = (value: string | null | undefined): number | null => {
     const date = membershipVerificationDate(value);
-    return validEvidenceDate(date) ? membershipVerificationTime(value) : null;
+    const time = validEvidenceDate(date) ? membershipVerificationTime(value) : null;
+    return time !== null && time <= Date.now() ? time : null;
   };
   const evidenceTime = (membership: Pick<EodMembershipInput,"verifiedAt" | "sourceAsOfDate">): number | null =>
     verifiedTime(membership.verifiedAt) ?? (validEvidenceDate(membership.sourceAsOfDate)
@@ -1436,22 +1445,28 @@ export async function loadEodMemberships(env: Env, targetSession: string): Promi
   const versions = await getMarketDataDb(env).prepare(
     `WITH eligible_versions AS (
        SELECT v.*, ROW_NUMBER() OVER (PARTITION BY v.universe_id
-         ORDER BY COALESCE(v.promoted_at, v.created_at) DESC, v.id DESC) AS position
+         ORDER BY CASE WHEN v.source_type IN ('public-common-stock-proxy','official-etf-holdings-proxy')
+           THEN v.source_as_of_date END DESC, COALESCE(v.promoted_at, v.created_at) DESC, v.id DESC) AS position
          FROM universe_versions v
         WHERE v.status IN ('active', 'superseded')
-          AND datetime(COALESCE(v.promoted_at, v.created_at)) < datetime(?)
+          AND (v.source_as_of_date IS NULL OR v.source_as_of_date <= ?)
+          AND (datetime(COALESCE(v.promoted_at, v.created_at)) < datetime(?)
+            OR (v.source_type IN ('public-common-stock-proxy','official-etf-holdings-proxy')
+              AND v.source_as_of_date IS NOT NULL AND v.source_as_of_date <= ?))
+          AND datetime(COALESCE(v.promoted_at, v.created_at)) <= datetime(?)
           AND v.universe_id IN (SELECT value FROM json_each(?))
      )
      SELECT v.universe_id AS universeId, v.id AS versionId, v.source,
             v.source_type AS sourceType, v.source_url AS sourceUrl,
             v.source_as_of_date AS sourceAsOfDate, u.active_version_id AS activeVersionId,
+            COALESCE(v.promoted_at, v.created_at) AS observedAt,
             m.ticker
        FROM eligible_versions v JOIN universes u ON u.id = v.universe_id
        JOIN universe_version_members m ON m.version_id = v.id
       WHERE v.position = 1
       ORDER BY v.universe_id, m.ticker LIMIT 40001
       /* eod-membership-input-read */`,
-  ).bind(membershipSessionEndUtc(targetSession), JSON.stringify(CORE_BREADTH_UNIVERSE_IDS)).all<Omit<EodMembershipInput, "members" | "verifiedAt"> & { ticker: string; activeVersionId: string | null }>();
+  ).bind(targetSession, membershipSessionEndUtc(targetSession), targetSession, new Date().toISOString(), JSON.stringify(CORE_BREADTH_UNIVERSE_IDS)).all<Omit<EodMembershipInput, "members" | "verifiedAt"> & { ticker: string; activeVersionId: string | null; observedAt: string | null }>();
   // The publication populations are capped at five universes of 8,000 members.
   // Historical version traversal still contributes reads; admission separately
   // reserves conservative headroom and stops if measured work exceeds it.
@@ -1476,16 +1491,26 @@ export async function loadEodMemberships(env: Env, targetSession: string): Promi
     if (!membership) {
       const sourceKey = row.universeId === "overall-market-proxy" ? "universe:overall-market-core" : `universe:${row.universeId}`;
       const currentSource = sources.get(sourceKey);
-      const canUseVerification = row.versionId === row.activeVersionId
+      const hasDatedCollection = isDatedMembershipSource(currentSource?.sourceType)
         && validEvidenceDate(currentSource?.sourceAsOfDate)
-        && verifiedTime(currentSource?.verifiedAt) !== null;
+        && membershipVerificationTime(currentSource?.verifiedAt) !== null
+        && membershipVerificationTime(currentSource?.verifiedAt)! <= Date.now()
+        && membershipVerificationDate(currentSource?.verifiedAt)! >= currentSource!.sourceAsOfDate!;
+      const canUseVerification = row.versionId === row.activeVersionId
+        && ((validEvidenceDate(currentSource?.sourceAsOfDate) && verifiedTime(currentSource?.verifiedAt) !== null)
+          || (row.universeId === "sp500-core" && isUndatedSp500Source(currentSource?.sourceType)
+            && currentSource?.sourceAsOfDate === null && verifiedTime(currentSource?.verifiedAt) !== null)
+          || hasDatedCollection);
+      const selectedType = canUseVerification ? currentSource!.sourceType : row.sourceType;
       membership = {
         universeId: row.universeId, versionId: row.versionId,
-        source: canUseVerification ? currentSource.source : row.source,
-        sourceType: canUseVerification ? currentSource.sourceType : row.sourceType,
-        sourceUrl: canUseVerification ? currentSource.sourceUrl : row.sourceUrl,
-        sourceAsOfDate: canUseVerification ? currentSource.sourceAsOfDate : row.sourceAsOfDate,
-        verifiedAt: canUseVerification ? currentSource.verifiedAt : null,
+        source: canUseVerification ? currentSource!.source : row.source,
+        sourceType: selectedType,
+        sourceUrl: canUseVerification ? currentSource!.sourceUrl : row.sourceUrl,
+        sourceAsOfDate: row.universeId === "sp500-core" && isUndatedSp500Source(selectedType) ? null
+          : canUseVerification ? currentSource!.sourceAsOfDate : row.sourceAsOfDate,
+        verifiedAt: canUseVerification ? currentSource!.verifiedAt
+          : isUndatedSp500Source(row.sourceType) && verifiedTime(row.observedAt) !== null ? row.observedAt : null,
         members: [],
       };
       memberships.set(row.universeId, membership);
@@ -1494,8 +1519,9 @@ export async function loadEodMemberships(env: Env, targetSession: string): Promi
   }
   for (const membership of memberships.values()) {
     const currentEvidenceTime=evidenceTime(membership);
+    const verifiedDate=membershipVerificationDate(membership.verifiedAt);
     if (currentEvidenceTime!==null
-      && countUsMarketTradingSessionsAfter(membership.verifiedAt ? membershipVerificationDate(membership.verifiedAt) : membership.sourceAsOfDate,targetSession) <= 5) continue;
+      && countUsMarketTradingSessionsAfter(verifiedDate && verifiedDate<=targetSession ? verifiedDate : membership.sourceAsOfDate,targetSession) <= 5) continue;
     // Unchanged membership versions may span months. Recover the contemporaneous
     // verification saved in an accepted historical publication, never today's
     // source verification or today's constituent list.
@@ -1512,11 +1538,14 @@ export async function loadEodMemberships(env: Env, targetSession: string): Promi
     try { payload=await decodeEodPayload(stored) as {membership?:Partial<EodMembershipInput>}; } catch { continue; }
     if (await eodHash(payload) !== stored.payloadChecksum) continue;
     const proof=payload?.membership;
+    const validProofDate = validEvidenceDate(proof?.sourceAsOfDate)
+      || (membership.universeId === "sp500-core" && isUndatedSp500Source(proof?.sourceType)
+        && proof?.sourceAsOfDate === null && verifiedTime(proof?.verifiedAt) !== null);
     if (!proof || proof.versionId!==membership.versionId || typeof proof.source!=="string"
-      || !validEvidenceDate(proof.sourceAsOfDate) || proof.sourceType==="bundled-fallback"
+      || !validProofDate || proof.sourceType==="bundled-fallback"
       || ![proof.sourceType,proof.sourceUrl,proof.verifiedAt].every((value) => value==null || typeof value==="string")
       || (proof.verifiedAt!=null && verifiedTime(proof.verifiedAt)===null)) continue;
-    const recoveredEvidenceTime=evidenceTime({verifiedAt:proof.verifiedAt ?? null,sourceAsOfDate:proof.sourceAsOfDate});
+    const recoveredEvidenceTime=evidenceTime({verifiedAt:proof.verifiedAt ?? null,sourceAsOfDate:proof.sourceAsOfDate ?? null});
     // Recovery fills missing/expired evidence; it must never age an unchanged
     // list by replacing a later verification with an older frozen publication.
     if (recoveredEvidenceTime===null || (currentEvidenceTime!==null && recoveredEvidenceTime<=currentEvidenceTime)) continue;
@@ -1531,7 +1560,7 @@ export async function loadEodMemberships(env: Env, targetSession: string): Promi
     membership.source=proof.source;
     membership.sourceType=proof.sourceType ?? null;
     membership.sourceUrl=proof.sourceUrl ?? null;
-    membership.sourceAsOfDate=proof.sourceAsOfDate;
+    membership.sourceAsOfDate=membership.universeId === "sp500-core" && isUndatedSp500Source(proof.sourceType) ? null : proof.sourceAsOfDate ?? null;
     membership.verifiedAt=proof.verifiedAt ?? null;
   }
   return Array.from(memberships.values()).filter((membership) => validateUniverseCandidate({

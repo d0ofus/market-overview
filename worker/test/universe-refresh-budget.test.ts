@@ -65,6 +65,12 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe("bounded independent membership refresh", () => {
+  it("does not repeatedly refresh an undated S&P proxy verified on the current New York day", () => {
+    expect(shouldRefreshUniverseSource({existingCount:503,status:"ok",sourceAsOfDate:null,
+      sourceType:"wikipedia-derived-public-proxy",verifiedAt:"2026-09-10T21:00:00Z",nextAttemptAt:null,refreshAfterDays:1})).toBe(false);
+    expect(shouldRefreshUniverseSource({existingCount:503,status:"ok",sourceAsOfDate:null,
+      sourceType:"wikipedia-derived-public-proxy",verifiedAt:"2026-09-09T21:00:00Z",nextAttemptAt:null,refreshAfterDays:1})).toBe(true);
+  });
   it("isolates one exhausted Nasdaq allowance and still refreshes S&P and official IWM", async () => {
     const exhausted = new ProviderBudgetExceededError("nasdaqtrader", 4, "day");
     vi.mocked(loadNasdaqTraderUniverses).mockRejectedValue(exhausted);

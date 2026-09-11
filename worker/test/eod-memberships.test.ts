@@ -42,13 +42,13 @@ describe("immutable EOD membership inputs", () => {
     const rows = await loadEodMemberships(env, "2026-09-08");
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ versionId: "active-version", source: "recent successful verification",
-      sourceAsOfDate: "2026-09-08", verifiedAt: "2026-09-08T21:00:00Z" });
+      sourceAsOfDate: null, verifiedAt: "2026-09-08T21:00:00Z" });
     expect(rows[0]!.members).toHaveLength(500);
     expect(queries[0]!.sql).toContain("v.status IN ('active', 'superseded')");
     expect(queries[0]!.sql).toContain("datetime(COALESCE(v.promoted_at, v.created_at)) < datetime(?)");
     expect(queries[0]!.sql).toContain("AND v.universe_id IN (SELECT value FROM json_each(?))");
     expect(queries[0]!.sql.trimEnd()).toMatch(/\/\* eod-membership-input-read \*\/$/);
-    expect(queries[0]!.args[0]).toBe("2026-09-09T04:00:00.000Z");
+    expect(queries[0]!.args.slice(0,3)).toEqual(["2026-09-08","2026-09-09T04:00:00.000Z","2026-09-08"]);
   });
 
   it("keeps today's successful verification when the unchanged source list is old and an older publication exists", async () => {
@@ -56,7 +56,7 @@ describe("immutable EOD membership inputs", () => {
       verifiedAt:"2026-09-04T21:00:00Z",sourceType:"public-index-constituents-proxy"}};
     const {env,queries}=environment({sourceDate:"2026-08-28",verifiedAt:"2026-09-08T21:00:00Z",proof,checksum:await eodHash(proof)});
     expect((await loadEodMemberships(env,"2026-09-08"))[0]).toMatchObject({
-      source:"recent successful verification",sourceAsOfDate:"2026-08-28",verifiedAt:"2026-09-08T21:00:00Z",
+      source:"recent successful verification",sourceAsOfDate:null,verifiedAt:"2026-09-08T21:00:00Z",
     });
     expect(queries.some((query) => query.sql.includes("FROM eod_publications"))).toBe(false);
   });
@@ -102,7 +102,7 @@ describe("immutable EOD membership inputs", () => {
   it.each(["2026-09-09T00:15:00Z", "2026-09-09 00:15:00"])("retains matching verification after UTC midnight on the same NY day (%s)", async (verifiedAt) => {
     const { env } = environment({ verifiedAt });
     expect((await loadEodMemberships(env, "2026-09-08"))[0]).toMatchObject({
-      source: "recent successful verification", sourceAsOfDate: "2026-09-08", verifiedAt,
+      source: "recent successful verification", sourceAsOfDate: null, verifiedAt,
     });
   });
 
@@ -121,7 +121,7 @@ describe("immutable EOD membership inputs", () => {
     const proof={membership:{versionId:"past-version",source:"verified historical source",sourceAsOfDate:"2026-09-04",
       sourceType:"public-index-constituents-proxy",members:Array.from({length:500},(_,index)=>`T${index}`)}};
     const {env}=environment({historical:true,proof,checksum:await eodHash(proof)});
-    expect((await loadEodMemberships(env,"2026-09-08"))[0]).toMatchObject({source:"verified historical source",sourceAsOfDate:"2026-09-04"});
+    expect((await loadEodMemberships(env,"2026-09-08"))[0]).toMatchObject({source:"verified historical source",sourceAsOfDate:null});
     const changed={membership:{...proof.membership,members:[...proof.membership.members.slice(1),"TODAYS_NEW_MEMBER"]}};
     const wrong=environment({historical:true,proof:changed,checksum:await eodHash(changed)});
     expect((await loadEodMemberships(wrong.env,"2026-09-08"))[0]?.source).toBe("immutable old source");
@@ -135,7 +135,7 @@ describe("immutable EOD membership inputs", () => {
     const encoded={payload:"{}",...await encodeEodPayload(proof)};
     const {env}=environment({historical:true,proof,checksum:await eodHash(proof),encoded});
     const [membership]=await loadEodMemberships(env,"2026-09-08");
-    expect(membership).toMatchObject({source:"verified historical source",sourceAsOfDate:"2026-09-04"});
+    expect(membership).toMatchObject({source:"verified historical source",sourceAsOfDate:null});
     expect(membership?.members).toHaveLength(500);
     expect(membership?.members[0]).toBe("T0");
   });

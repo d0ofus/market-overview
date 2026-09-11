@@ -167,7 +167,7 @@ function shouldPreferSsgaFundData(etfTicker: string): boolean {
 }
 
 function ssgaDirectFundDataUrl(etfTicker: string): string {
-  return `https://www.ssga.com/library-content/products/fund-data/etfs/us/holdings-daily-us-en-${etfTicker.toLowerCase()}.csv`;
+  return `https://www.ssga.com/library-content/products/fund-data/etfs/us/holdings-daily-us-en-${etfTicker.toLowerCase()}.xlsx`;
 }
 
 function deriveSourceUrlFromFundName(etfTicker: string, fundName: string | null): string | null {
@@ -1314,94 +1314,148 @@ async function fetchInvescoConstituents(etfTicker: string, pageUrlOverride?: str
   throw new Error(`Invesco holdings CSV parse returned no holdings (${errors.slice(0, 5).join(" | ")})`);
 }
 
-async function fetchSsgaFundDataConstituents(etfTicker: string): Promise<EtfFetchResult> {
-  const tickerLower = etfTicker.toLowerCase();
-  const directCandidates = [
-    `https://www.ssga.com/library-content/products/fund-data/etfs/us/holdings-daily-us-en-${tickerLower}.csv`,
-    `https://www.ssga.com/library-content/products/fund-data/etfs/us/fund-holdings-us-en-${tickerLower}.csv`,
-    `https://www.ssga.com/library-content/products/fund-data/etfs/us/fund-data-us-en-${tickerLower}.csv`,
-    `https://www.ssga.com/library-content/products/fund-data/etfs/us/pdhist-us-en-${tickerLower}.csv`,
-    `https://www.ssga.com/library-content/products/fund-data/etfs/us/pdhist-us-en-${tickerLower}.xlsx`,
-    `https://www.ssga.com/library-content/products/fund-data/etfs/us/holdings-daily-us-en-${tickerLower}.xlsx`,
-    `https://www.ssga.com/library-content/products/fund-data/etfs/us/fund-holdings-us-en-${tickerLower}.xlsx`,
-    `https://www.ssga.com/library-content/products/fund-data/etfs/us/fund-data-us-en-${tickerLower}.xlsx`,
-  ];
+const SSGA_MAX_FILE_BYTES = 2_000_000;
+const SSGA_MAX_HOLDINGS_FILES = 4;
 
+function ssgaHoldingsUrl(value: string, etfTicker: string): string | null {
+  try {
+    const url = new URL(value.replace(/&amp;/g, "&"), "https://www.ssga.com");
+    const match = /^\/library-content\/products\/fund-data\/etfs\/us\/(?:holdings-daily|fund-holdings)-us-en-([a-z0-9.-]+)\.(xlsx|csv)$/i.exec(url.pathname);
+    if (url.protocol !== "https:" || url.hostname !== "www.ssga.com" || url.port || url.username || url.password
+      || !match || match[1].toUpperCase() !== etfTicker.toUpperCase()) return null;
+    // Query strings are not part of these public static holdings identities.
+    return `${url.origin}${url.pathname}`;
+  } catch { return null; }
+}
+
+export function extractSsgaHoldingsLinks(html: string, etfTicker: string): string[] {
+  const matches = html.match(/(?:https?:\/\/[^"'\s<>]+|\/library-content\/[^"'\s<>]+)\.(?:xlsx|csv)(?:\?[^"'\s<>]*)?/gi) ?? [];
+  return [...new Set(matches.map(value => ssgaHoldingsUrl(value, etfTicker)).filter((value): value is string => value !== null))]
+    .sort((a, b) => Number(b.endsWith(".xlsx")) - Number(a.endsWith(".xlsx"))).slice(0, SSGA_MAX_HOLDINGS_FILES);
+}
+
+/** SSGA's dated, single-fund holdings export. Performance/NAV workbooks and
+ * missing fund/date evidence cannot be accepted as a current full snapshot. */
+export function parseSsgaHoldingsFile(etfTicker: string, buffer: ArrayBuffer, kind: "xlsx" | "csv") {
+  if (!buffer.byteLength || buffer.byteLength > SSGA_MAX_FILE_BYTES) throw new Error("ssga-holdings-file-size-invalid");
+  let rows: unknown[][];
+  if (kind === "xlsx") {
+    const signature = new Uint8Array(buffer, 0, Math.min(4, buffer.byteLength));
+    if (signature.length !== 4 || signature[0] !== 0x50 || signature[1] !== 0x4b || signature[2] !== 3 || signature[3] !== 4) {
+      throw new Error("ssga-holdings-workbook-invalid");
+    }
+    const workbook = XLSX.read(buffer, { type: "array" });
+    const sheets = workbook.SheetNames.filter(name => /^holdings$/i.test(name.trim()));
+    if (sheets.length !== 1) throw new Error("ssga-holdings-sheet-missing");
+    rows = XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[sheets[0]], { header: 1, defval: null, blankrows: false, raw: false });
+  } else {
+    const text = new TextDecoder().decode(buffer);
+    if (/^\s*</.test(text)) throw new Error("ssga-holdings-csv-invalid");
+    const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/).filter(line => line.trim());
+    const delimiter = lines.some(line => line.includes("\t")) ? "\t" : ",";
+    rows = lines.map(line => splitDelimitedRow(line, delimiter));
+  }
+  const metadata = rows.slice(0, 20);
+  const fundRows = metadata.filter(row => /^ticker(?: symbol)?\s*:?$/i.test(String(row[0] ?? "").trim()));
+  if (fundRows.length !== 1 || String(fundRows[0][1] ?? "").trim().toUpperCase() !== etfTicker.toUpperCase()) {
+    throw new Error("ssga-holdings-fund-identity-invalid");
+  }
+  const datedRows = metadata.filter(row => /^(?:holdings|holdings as of|as of|holdings date)\s*:?$/i.test(String(row[0] ?? "").trim()));
+  const dates = datedRows.flatMap(row => row.map(parseEtfHoldingsDate)).filter((date): date is string => date !== null);
+  if (!dates.length || new Set(dates).size !== 1) throw new Error("ssga-holdings-effective-date-unavailable");
+  const asOfDate = dates[0];
+  const dateIssue = etfHoldingsDateIssue([asOfDate]);
+  if (dateIssue) throw new Error(dateIssue);
+  const header = findSsgaHeaderIndexes(rows);
+  if (!header) throw new Error("ssga-holdings-header-missing");
+  const holdings: EtfConstituent[] = [];
+  for (const row of rows.slice(header.headerRowIndex + 1)) {
+    let ticker = normalizeTicker(String(row[header.tickerIdx] ?? ""));
+    // Footer prose has no position weight. A weighted row with no identity is
+    // missing coverage, not permission to silently drop a reported position.
+    const weight = parseWeightCell(row[header.weightIdx]);
+    if (!ticker) {
+      if (weight !== null) throw new Error("ssga-holdings-position-identity-invalid");
+      continue;
+    }
+    const name = header.nameIdx >= 0 ? String(row[header.nameIdx] ?? "").trim() : "";
+    // The issuer uses '-' for both this currency balance and its money-market
+    // fund. USD is the reported currency identity, not a manufactured equity.
+    if (ticker === "-" && name === "US DOLLAR") ticker = "USD";
+    const assetType = etfHoldingAssetType(etfTicker, { ticker, name, source: "ssga:fund-data" });
+    if ((ticker === "-" && assetType !== "money_market") || weight === null) throw new Error("ssga-holdings-position-identity-invalid");
+    holdings.push({ ticker, name: name || null, weight, assetType });
+  }
+  const issue = etfHoldingsIssue(etfTicker, holdings.map(row => ({ ...row, source: "ssga:fund-data" })));
+  if (!holdings.length || issue) throw new Error(issue ?? "ssga-holdings-empty");
+  return { holdings, asOfDate };
+}
+
+async function readSsgaBody(response: Response): Promise<ArrayBuffer> {
+  if (Number(response.headers.get("content-length")) > SSGA_MAX_FILE_BYTES) throw new Error("ssga-holdings-file-size-invalid");
+  if (!response.body) throw new Error("ssga-holdings-body-unavailable");
+  const reader = response.body.getReader(), chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      length += chunk.value.byteLength;
+      if (length > SSGA_MAX_FILE_BYTES) throw new Error("ssga-holdings-file-size-invalid");
+      chunks.push(chunk.value);
+    }
+  } catch (error) { await reader.cancel().catch(() => undefined); throw error; }
+  finally { reader.releaseLock(); }
+  const result = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength; }
+  return result.buffer;
+}
+
+export async function fetchSsgaFundDataConstituents(etfTicker: string): Promise<EtfFetchResult> {
   const pageUrl = SSGA_SPDR_PAGE_BY_TICKER[etfTicker] ?? null;
-  const pageCandidates: string[] = [];
+  const deadline = AbortSignal.timeout(45_000);
+  const headers = { "User-Agent": "market-command-centre/1.0", Referer: pageUrl ?? "https://www.ssga.com/" };
+  const errors: string[] = [];
+  let pageCandidates: string[] = [];
   if (pageUrl) {
     try {
-      const pageRes = await fetch(pageUrl, {
-        headers: {
-          "User-Agent": "market-command-centre/1.0",
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        },
-      });
-      if (pageRes.ok) {
-        const html = await pageRes.text();
-        const matches = html.match(/https?:\/\/[^"'\\s>]+\.(?:xlsx|csv)/gi) ?? [];
-        for (const m of matches) pageCandidates.push(m);
-
-        const relMatches = html.match(/\/library-content\/[^"'\\s>]+\.(?:xlsx|csv)/gi) ?? [];
-        for (const m of relMatches) pageCandidates.push(`https://www.ssga.com${m}`);
+      const response = await fetch(pageUrl, { headers: { ...headers, Accept: "text/html" }, signal: AbortSignal.any([deadline, AbortSignal.timeout(8_000)]) });
+      if (response.status === 403 || response.status === 429) {
+        await response.body?.cancel();
+        throw new Error(`ssga-source-cooldown-http-${response.status}`);
       }
-    } catch {
-      // continue with direct candidates
-    }
-  }
-
-  const tried = new Set<string>();
-  const candidates = [...pageCandidates, ...directCandidates].filter((u) => {
-    const key = u.toLowerCase();
-    if (tried.has(key)) return false;
-    tried.add(key);
-    return true;
-  });
-
-  const errors: string[] = [];
-  for (const url of candidates) {
-    try {
-      const res = await fetch(url, {
-        headers: {
-          "User-Agent": "market-command-centre/1.0",
-          Accept: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/octet-stream,*/*",
-          Referer: pageUrl || "https://www.ssga.com/",
-        },
-      });
-      if (!res.ok) {
-        errors.push(`${new URL(url).pathname} (${res.status})`);
-        continue;
-      }
-      const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
-      const looksLikeXlsx =
-        url.toLowerCase().endsWith(".xlsx") ||
-        contentType.includes("sheet") ||
-        contentType.includes("zip") ||
-        contentType.includes("octet-stream");
-      let rows: EtfConstituent[] = [];
-      if (looksLikeXlsx) {
-        const body = await res.arrayBuffer();
-        rows = parseSsgaWorkbookRows(body);
-      } else {
-        const bodyText = await res.text();
-        rows = parseSsgaDelimitedRows(bodyText);
-      }
-      if (rows.length > 0) {
-        return {
-          holdings: rows,
-          source: "ssga:fund-data",
-          sourceUrl: url,
-          sourceTier: "official",
-          coverage: "full",
-          providerRecordsCount: rows.length,
-        };
-      }
-      errors.push(`${new URL(url).pathname} (parsed 0 rows from fund-data file)`);
+      if (response.ok && (!response.url || new URL(response.url).hostname === "www.ssga.com")) {
+        pageCandidates = extractSsgaHoldingsLinks(new TextDecoder().decode(await readSsgaBody(response)), etfTicker);
+      } else { await response.body?.cancel(); }
     } catch (error) {
-      errors.push(error instanceof Error ? error.message : "unknown");
+      if (error instanceof Error && /ssga-source-cooldown|holdings-operator-/.test(error.message)) throw error;
+      errors.push("ssga-holdings-page-unavailable");
     }
   }
-  throw new Error(`SSGA fund-data parse returned no holdings (${errors.slice(0, 5).join(" | ")})`);
+  const primary = ssgaDirectFundDataUrl(etfTicker);
+  const candidates = [...new Set([...pageCandidates.filter(url => url.endsWith(".xlsx")), primary,
+    ...pageCandidates.filter(url => url.endsWith(".csv")), primary.replace(/\.xlsx$/, ".csv")])].slice(0, SSGA_MAX_HOLDINGS_FILES);
+  for (const url of candidates) {
+    if (deadline.aborted) break;
+    try {
+      const response = await fetch(url, { headers: { ...headers, Accept: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" },
+        signal: AbortSignal.any([deadline, AbortSignal.timeout(8_000)]) });
+      if (!response.ok) {
+        await response.body?.cancel();
+        if (response.status === 403 || response.status === 429) throw new Error(`ssga-source-cooldown-http-${response.status}`);
+        errors.push(`ssga-holdings-http-${response.status}`); continue;
+      }
+      if (response.url && !ssgaHoldingsUrl(response.url, etfTicker)) throw new Error("ssga-holdings-redirect-identity-invalid");
+      const parsed = parseSsgaHoldingsFile(etfTicker, await readSsgaBody(response), url.endsWith(".xlsx") ? "xlsx" : "csv");
+      return { ...parsed, source: "ssga:fund-data", sourceUrl: url, sourceTier: "official", coverage: "full", providerRecordsCount: parsed.holdings.length };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "ssga-holdings-request-unavailable";
+      if (/ssga-source-cooldown|holdings-operator-/.test(message)) throw error;
+      errors.push(/^(?:ssga-|holdings-)[a-z-]+$/.test(message) ? message : "ssga-holdings-request-unavailable");
+    }
+  }
+  throw new Error(`SSGA holdings unavailable (${[...new Set(errors)].join(" | ")})`);
 }
 
 async function fetchYahooConstituents(etfTicker: string): Promise<EtfFetchResult> {
@@ -1728,6 +1782,7 @@ export async function syncEtfConstituents(env: Env, etfTickerInput: string): Pro
     ]);
   }
 
+  const ssgaAttempted = officialUrl !== null && new URL(officialUrl).hostname === "www.ssga.com";
   if (officialUrl) {
     source = `official:${new URL(officialUrl).hostname.replace(/^www\./i, "")}`;
     try {
@@ -1746,7 +1801,7 @@ export async function syncEtfConstituents(env: Env, etfTickerInput: string): Pro
   if (!result && (etfTicker === "GLD" || etfTicker === "SLV")) {
     await persistSyncErrorAndThrow(env, etfTicker, source, errors);
   }
-  if (!result && shouldPreferSsgaFundData(etfTicker)) {
+  if (!result && !ssgaAttempted && shouldPreferSsgaFundData(etfTicker)) {
     source = "ssga:fund-data";
     try {
       result = checkedEtfResult(etfTicker, await fetchSsgaFundDataConstituents(etfTicker));

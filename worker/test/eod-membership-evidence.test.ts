@@ -38,9 +38,24 @@ describe("frozen membership evidence at publication", () => {
     expect(check({ sourceType }).reason).toBe("membership-source-unverified-or-unrelated");
   });
   it("keeps missing provenance and insufficient calendar history unavailable", () => {
-    expect(assessEodMembershipEvidence({ ...membership, sourceAsOfDate: null }, "2026-09-08", calendar).publishable).toBe(false);
+    expect(assessEodMembershipEvidence({ ...membership, sourceAsOfDate: null, verifiedAt: null }, "2026-09-08", calendar).publishable).toBe(false);
     expect(assessEodMembershipEvidence({ ...membership, verifiedAt: null }, "2026-09-08", calendar).publishable).toBe(false);
     expect(assessEodMembershipEvidence(membership, "2026-09-08", ["2026-09-08", "2026-09-08"]).publishable).toBe(false);
     expect(assessEodMembershipEvidence({ ...membership, verifiedAt: "2026-09-03T21:00:00Z" }, "2026-09-08", ["2026-09-08"]).publishable).toBe(false);
+  });
+  it("uses observation timestamps for an undated proxy without assigning a source date or backdating tomorrow's set", () => {
+    expect(assessEodMembershipEvidence({...membership,sourceAsOfDate:null},"2026-09-08",calendar))
+      .toMatchObject({publishable:true,ageSessions:0,degraded:false});
+    expect(assessEodMembershipEvidence({...membership,sourceAsOfDate:null,verifiedAt:"2026-09-09T05:00:00Z"},"2026-09-08",calendar).publishable).toBe(false);
+  });
+  it("retains a dated issuer file's real later collection time and historical age", () => {
+    const actual={universeId:"russell2000-core",versionId:"dated-issuer-version",sourceType:"official-etf-holdings-proxy",
+      sourceAsOfDate:"2026-09-04",verifiedAt:"2026-09-09T05:00:00Z"};
+    expect(assessEodMembershipEvidence(actual,"2026-09-08",calendar)).toMatchObject({publishable:true,ageSessions:1,degraded:true});
+    expect(actual.verifiedAt).toBe("2026-09-09T05:00:00Z");
+    expect(assessEodMembershipEvidence({...actual,sourceAsOfDate:"2026-09-09"},"2026-09-08",calendar).publishable).toBe(false);
+    expect(assessEodMembershipEvidence({...actual,sourceAsOfDate:"2026-08-28"},"2026-09-08",calendar).publishable).toBe(false);
+    expect(assessEodMembershipEvidence({...actual,verifiedAt:"2027-09-09T05:00:00Z"},"2026-09-08",calendar,
+      new Date("2026-09-11T05:00:00Z")).reason).toBe("membership-verification-invalid-or-future");
   });
 });
