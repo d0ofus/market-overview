@@ -1,7 +1,7 @@
 import type { EtfConstituent } from "./etf";
 import type { EtfSyncStatusRow } from "./etf-sync-status";
 
-export type EtfHoldingAssetType = "equity" | "crypto" | "physical_commodity" | "cash" | "fund" | "money_market" | "derivative";
+export type EtfHoldingAssetType = "equity" | "crypto" | "physical_commodity" | "cash" | "fund" | "money_market" | "derivative" | "corporate_action";
 export type EtfLifecycle = { status: "liquidated"; lastTradingDate: string; liquidationDate: string; sourceUrl: string; confirmationUrl: string };
 const CLOSED_FUNDS: Readonly<Record<string, EtfLifecycle>> = {
   EATZ: { status: "liquidated", lastTradingDate: "2026-04-30", liquidationDate: "2026-05-07",
@@ -15,10 +15,25 @@ export function closedEtfTickers(now:Date):string[] {
   return Object.entries(CLOSED_FUNDS).filter(([,fund])=>fund.liquidationDate<=today).map(([ticker])=>ticker).sort();
 }
 
+/** Literal currency names in the issuer's holdings file, not equity aliases. */
+export function ssgaCurrencyIdentity(name: string): string | null {
+  return ({ "US DOLLAR": "USD", "POUND STERLING": "GBP" } as Record<string,string>)[name.trim().toUpperCase()] ?? null;
+}
+
+const SSGA_SECTOR_FUTURES: Readonly<Record<string,{root:string;name:string}>> = {
+  XLB: {root:"IXD",name:"XAB MATERIALS"}, XLK: {root:"IXT",name:"XAK TECHNOLOGY"},
+  XLF: {root:"IXA",name:"XAF FINANCIAL"},
+  XLE: {root:"IXP",name:"XAE ENERGY"}, XLV: {root:"IXC",name:"XAV HEALTH CARE"},
+  XLI: {root:"IXI",name:"XAI EMINI INDUSTR"}, XLP: {root:"IXR",name:"XAP CONS STAPLES"},
+  XLU: {root:"IXS",name:"XAU UTILITIES"}, XLY: {root:"IXY",name:"XAY CONS DISCRET"},
+};
+
 export function etfHoldingAssetType(etfTicker: string, row: Pick<EtfConstituent, "ticker" | "name"> & { source?: string }): EtfHoldingAssetType {
   const ticker = row.ticker.toUpperCase(), name = row.name ?? "";
   if (row.source === "ssga:fund-data") {
-    if (ticker === "-" && name === "US DOLLAR") return "cash";
+    const currency=ssgaCurrencyIdentity(name);
+    if (currency && (ticker === "-" || ticker === currency)) return "cash";
+    if (etfTicker === "XLP" && ticker === "931CVR013" && name === "CONTRA WALGREENS BOOTS") return "corporate_action";
     // The issuer reports this cash-equivalent fund without an equity ticker.
     // Retain its literal identifier/name; do not invent a tradable stock symbol.
     if (ticker === "-" && /^SSI US GOV MONEY MARKET(?: CLASS)?$/i.test(name.trim())) return "money_market";
@@ -26,6 +41,10 @@ export function etfHoldingAssetType(etfTicker: string, row: Pick<EtfConstituent,
     const contract = /^[A-Z]{1,4}([FGHJKMNQUVXZ])(\d{1,2})$/.exec(ticker);
     const months: Record<string, string> = { JAN: "F", FEB: "G", MAR: "H", APR: "J", MAY: "K", JUN: "M", JUL: "N", AUG: "Q", SEP: "U", OCT: "V", NOV: "X", DEC: "Z" };
     if (future && contract && months[future[1].toUpperCase()] === contract[1] && future[2].endsWith(contract[2])) return "derivative";
+    const sector=SSGA_SECTOR_FUTURES[etfTicker], normalizedName=name.trim().replace(/\s+/g," ").toUpperCase();
+    const sectorDate=sector && new RegExp(`^${sector.name} (JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)(\\d{2})$`).exec(normalizedName);
+    if (sectorDate && contract && ticker.startsWith(sector.root) && ticker.slice(sector.root.length)===`${contract[1]}${contract[2]}`
+      && months[sectorDate[1]]===contract[1] && sectorDate[2].endsWith(contract[2])) return "derivative";
   }
   if ((etfTicker === "GLD" && ticker === "PHYSICAL-GOLD" && name === "Physical gold bullion" && row.source === "spdrgoldshares:physical-gold-archive")
     || (etfTicker === "SLV" && ticker === "PHYSICAL-SILVER" && name === "Physical silver bullion" && row.source === "ishares:holdings-csv")) return "physical_commodity";
@@ -74,7 +93,8 @@ export function etfHoldingsIssue(etfTicker: string, rows: readonly (Pick<EtfCons
   // Leave explicit leverage/inverse fund contracts outside this scoped check.
   const ordinary = etfTicker === "EATZ" || /^(?:XL[BCDEFIKPRUVY]|XLC|GLD|SLV|IWM|SPY|QQQ)$/.test(etfTicker);
   if (ordinary && (rows.some(row => row.weight !== null && (Math.abs(row.weight) > 100.5
-    || (row.weight < 0 && etfHoldingAssetType(etfTicker, row) !== "derivative")))
+    || (row.weight < 0 && etfHoldingAssetType(etfTicker, row) !== "derivative"
+      && !(row.source === "ssga:fund-data" && etfHoldingAssetType(etfTicker,row) === "cash"))))
     || rows.reduce((sum, row) => sum + (row.weight ?? 0), 0) > 105)) return "holdings-weights-inconsistent";
   return null;
 }
@@ -89,7 +109,7 @@ export function prepareStoredEtfHoldings(etfTicker: string, rows: StoredEtfHoldi
   const stale = asOfDate !== null && now.getTime() - Date.parse(`${asOfDate}T00:00:00Z`) > 7 * 86400_000;
   const retained = issue ? [] : rows.map(row => ({ ...row, assetType: etfHoldingAssetType(etfTicker, row),
     weight: row.source === "ishares:single-asset" ? null : row.weight,
-    chartEligible: !["physical_commodity", "cash", "crypto", "money_market", "derivative"].includes(etfHoldingAssetType(etfTicker, row)) }));
+    chartEligible: !["physical_commodity", "cash", "crypto", "money_market", "derivative", "corporate_action"].includes(etfHoldingAssetType(etfTicker, row)) }));
   const messages: string[] = [];
   if (issue) messages.push(`Cached holdings quarantined (${issue}); ${rows.length} stored rows require validated replacement.`);
   if (closed) messages.push(`${etfTicker} last traded ${lifecycle.lastTradingDate} and was liquidated ${lifecycle.liquidationDate}. Any validated holdings shown are historical.`);

@@ -15,6 +15,9 @@ import { assertStorageVerificationCapture, type StorageVerificationEvidence } fr
 import { validateStorageConsumerEvidence, verifyStorageAcceptedPublications, type StorageConsumerEvidence } from "../src/market-storage-acceptance";
 import { storageHash } from "../src/market-storage-pages";
 import { buildRuntimeEvidence, collectRuntimeEvidence, validateRuntimeEvidence, type RuntimeEvidenceIdentity } from "../src/eod-runtime-evidence";
+import { buildRuntimeTailEvidence, claimRuntimeTailAttempt, loadRuntimeTailReceipt, RUNTIME_TAIL_ROUTES,
+  storeRuntimeTailReceipt, verifyRuntimeLiveVersion, type RuntimeTailAttempt } from "../src/eod-runtime-tail-evidence";
+import { openRuntimeLiveTail } from "./eod-runtime-live-tail";
 import { assertCandidateMigrationState, privateRuntimeAdminSecret, assertRuntimeCandidateCredentialBinding, prepareRuntimeCandidateConfig, runCandidateProbes, runtimeCandidateIdentity,
   runtimeCandidatePublicationHash,
   assertRuntimeCandidateWindow, runtimeCandidateRequiresWindow,
@@ -25,10 +28,13 @@ const workerRoot = resolve(dirname(fileURLToPath(import.meta.url)), ".."), repoR
 const required = (key: string): string => { const value = process.env[key]?.trim(); if (!value) throw new Error(`runtime-candidate-missing:${key}`); return value; };
 const git = (...args: string[]) => execFileSync("git", args, { cwd: repoRoot, encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }).trim();
 type State = { version: 1; identity: CandidateIdentity; configHash: string; publicationHash: string; validationPlanHash: string; probeUntil: string; deploymentAttempted: boolean;
+  collectionMode?: "telemetry" | "live-tail";
   secretsInstalled?: boolean; candidateCredentialHash?: string; workerVersion?: string; baseUrl?: string; samples?: CandidateProbeState };
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "run";
   if (!["prepare", "run", "collect"].includes(command)) throw new Error("runtime-candidate-command-invalid");
+  const collectionMode = process.env.EOD_RUNTIME_COLLECTION_MODE ?? "telemetry";
+  if (collectionMode !== "telemetry" && collectionMode !== "live-tail") throw new Error("runtime-candidate-collection-mode-invalid");
   if (git("status", "--porcelain").length) throw new Error("runtime-candidate-clean-committed-checkout-required");
   const codeRevision = git("rev-parse", "HEAD"), accountId = required("CLOUDFLARE_ACCOUNT_ID"), token = required("CLOUDFLARE_API_TOKEN");
   const d1Token = process.env.CLOUDFLARE_EOD_D1_TOKEN || token, migrationId = required("EOD_STORAGE_MIGRATION_ID");
@@ -91,14 +97,14 @@ async function main(): Promise<void> {
     let state: State;
     if (savedState) {
       state = savedState;
-      if (state.version !== 1 || state.publicationHash !== ready.publicationHash || state.validationPlanHash !== ready.validationPlanHash || await storageHash(state.identity) !== await storageHash(identity)
+      if ((state.collectionMode ?? "telemetry") !== collectionMode || state.version !== 1 || state.publicationHash !== ready.publicationHash || state.validationPlanHash !== ready.validationPlanHash || await storageHash(state.identity) !== await storageHash(identity)
         || !existsSync(configPath) || await storageHash(JSON.parse(readFileSync(configPath, "utf8"))) !== state.configHash) throw new Error("runtime-candidate-saved-config-integrity");
     } else {
       if (command === "collect") throw new Error("runtime-candidate-existing-deployment-required");
       const probeUntil = new Date(Date.now() + 2 * 3600_000).toISOString();
       const config = prepareRuntimeCandidateConfig(parse(readFileSync(resolve(workerRoot, "wrangler.toml"), "utf8")), identity,
         { mainPath: resolve(workerRoot, "src/index.ts"), probeUntil });
-      state = { version: 1, identity, configHash: await storageHash(config), publicationHash: ready.publicationHash,
+      state = { version: 1, identity, collectionMode, configHash: await storageHash(config), publicationHash: ready.publicationHash,
         validationPlanHash: ready.validationPlanHash, probeUntil, deploymentAttempted: false };
       writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", { flag: "wx", mode: 0o600 }); persist(state);
     }
@@ -174,7 +180,42 @@ async function main(): Promise<void> {
     const account = await api("/workers/subdomain"), subdomain = account?.subdomain;
     if (typeof subdomain !== "string" || !/^[a-z0-9][a-z0-9-]{0,62}$/.test(subdomain)) throw new Error("runtime-candidate-workers-subdomain-invalid");
     state.baseUrl = `https://${identity.workerName}.${subdomain}.workers.dev`; persist(state);
-    if (command === "run" && (!state.samples || (state.samples.probes.length < 5 && state.samples.probes.every((probe) => probe.status === "ok")))) {
+    const runtimeIdentity: RuntimeEvidenceIdentity = { probeId: identity.probeId, workerName: identity.workerName, workerVersion: state.workerVersion!, codeRevision,
+      targetDatabaseId: targetId, historyDatabaseId: historyId, opsDatabaseId: opsId, coreDatabaseId: coreId, budgetProfile:budgetProfile.name };
+    let evidence;
+    if (collectionMode === "live-tail") {
+      try {
+        evidence = await loadRuntimeTailReceipt(env.OPS_DB!, runtimeIdentity, state);
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== "runtime-tail-durable-receipt-missing") throw error;
+        if (command !== "run" || state.samples?.probes.length) throw new Error("runtime-tail-receipt-missing-new-candidate-required");
+        if (Date.parse(state.probeUntil) <= Date.now()) throw new Error("runtime-candidate-expired-new-attempt-required");
+        await assertCoordinatorWindow(); await assertSamePublications();
+        const stream = await openRuntimeLiveTail({ accountId, token, identity: runtimeIdentity });
+        try {
+          const attempt: RuntimeTailAttempt = { version: 1, identity: runtimeIdentity,
+            publicationHash: state.publicationHash, validationPlanHash: state.validationPlanHash,
+            connectedAt: stream.connectedAt, probeUntil: state.probeUntil,
+            requests: RUNTIME_TAIL_ROUTES.map(route => ({ route, nonce: crypto.randomUUID() })) };
+          await claimRuntimeTailAttempt(env.OPS_DB!, attempt);
+          state.samples = { from: Date.now(), to: null, probes: [] }; persist(state);
+          state.samples = await runCandidateProbes({ identity, baseUrl: state.baseUrl, adminSecret: adminSecret!, state: state.samples,
+            liveRequests: attempt.requests, assertStreamHealthy: stream.assertHealthy,
+            save: async samples => { state.samples = structuredClone(samples); persist(state); }, assertEligible: assertSamePublications,
+            assertCurrentVersion: async () => { await verifyRuntimeLiveVersion({ accountId, token, identity: runtimeIdentity }); } });
+          const events = await stream.waitForFive(); state.samples.to = Date.now(); persist(state);
+          stream.assertHealthy();
+          const closedAt = await stream.close();
+          await assertSamePublications();
+          const version = await verifyRuntimeLiveVersion({ accountId, token, identity: runtimeIdentity });
+          evidence = await buildRuntimeTailEvidence({ identity: runtimeIdentity, version, attempt, events,
+            responses: state.samples.probes.map(probe => ({ nonce: probe.nonce!, requestId: probe.requestId! })),
+            window: { from: state.samples.from, to: state.samples.to }, closedAt });
+          evidence = await storeRuntimeTailReceipt(env.OPS_DB!, evidence);
+        } finally { await stream.close(); }
+      }
+    }
+    if (collectionMode === "telemetry" && command === "run" && (!state.samples || (state.samples.probes.length < 5 && state.samples.probes.every((probe) => probe.status === "ok")))) {
       if (Date.parse(state.probeUntil) <= Date.now()) throw new Error("runtime-candidate-expired-new-attempt-required");
       await assertCoordinatorWindow();
       state.samples ??= { from: Date.now(), to: null, probes: [] }; persist(state);
@@ -185,16 +226,15 @@ async function main(): Promise<void> {
           assertCurrentVersion: async () => { if (await deployed() !== state.workerVersion) throw new Error("runtime-candidate-deployment-changed"); } });
       } catch { console.log(JSON.stringify({ status: "candidate-probe-incomplete", workerName: identity.workerName, inspect: "bounded-runtime-evidence" })); }
     }
-    if (!state.samples?.probes.length) throw new Error("runtime-candidate-probes-required");
-    state.samples.to ??= Date.now(); persist(state);
-    const runtimeIdentity: RuntimeEvidenceIdentity = { probeId: identity.probeId, workerName: identity.workerName, workerVersion: state.workerVersion!, codeRevision,
-      targetDatabaseId: targetId, historyDatabaseId: historyId, opsDatabaseId: opsId, coreDatabaseId: coreId, budgetProfile:budgetProfile.name };
-    let evidence;
-    for (let attempt = 0; attempt < 5; attempt++) {
+    if (collectionMode === "telemetry") {
+      if (!state.samples?.probes.length) throw new Error("runtime-candidate-probes-required");
+      state.samples.to ??= Date.now(); persist(state);
+      for (let attempt = 0; attempt < 5; attempt++) {
       try { evidence = await collectRuntimeEvidence({ accountId, token, identity: runtimeIdentity, from: state.samples.from, to: state.samples.to }); }
       catch (error) { if (attempt === 4 || (error instanceof Error && /http-(401|403|429)/.test(error.message))) throw error; }
       if (evidence?.complete) break;
       if (attempt < 4) await new Promise((done) => setTimeout(done, 10_000));
+      }
     }
     if (!evidence) throw new Error("runtime-candidate-raw-evidence-unavailable");
     if (evidence.complete) { await validateRuntimeEvidence(evidence, runtimeIdentity); await assertSamePublications(); if (await deployed() !== state.workerVersion) throw new Error("runtime-candidate-deployment-changed"); }

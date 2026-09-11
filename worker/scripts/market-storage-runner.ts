@@ -21,6 +21,8 @@ import { buildStorageCutoverEvidence, storeStorageCutoverProof } from "../src/ma
 import { storeStorageHistoryMaintenanceApproval } from "../src/eod-storage-history-capacity";
 import { refreshHistoryMaintenanceEvidence } from "../src/eod-history-capacity";
 import { collectRuntimeEvidence, validateRuntimeEvidence, type RuntimeEvidence } from "../src/eod-runtime-evidence";
+import { loadRuntimeTailReceipt, verifyRuntimeLiveVersion } from "../src/eod-runtime-tail-evidence";
+import { runtimeCandidatePublicationHash } from "../src/eod-runtime-candidate";
 import { verifyStoragePublicBindings } from "../src/market-storage-activation";
 import { assertEodCutover } from "../src/eod-rollout-service";
 import { expectedEodSession } from "../src/eod-coordinator";
@@ -91,7 +93,7 @@ async function main():Promise<void> {
       const actual=await assertStorageSourceFrozen(sourceDb,storageMigrationIdentity(existing),existing.source_schema_hash);
       if(actual.revision!==existing.source_revision)throw new Error("storage-source-capture-changed");
     };
-    const collectAuthenticatedRuntime=async () => {
+    const collectAuthenticatedRuntime=async (runId:string,tickers:string[],expected:string,validationPlanHash:string) => {
       const requested=file("EOD_STORAGE_RUNTIME_EVIDENCE_PATH") as RuntimeEvidence;
       if(requested?.identity?.codeRevision!==codeRevision || requested.identity.targetDatabaseId!==target
         || requested.identity.historyDatabaseId!==history || requested.identity.opsDatabaseId!==ops
@@ -99,6 +101,15 @@ async function main():Promise<void> {
         || !Number.isFinite(requested.window?.to) || requested.window.to>Date.now()
         || Date.now()-requested.window.to>86_400_000)throw new Error("storage-runtime-evidence-identity-or-age-mismatch");
       await validateRuntimeEvidence(requested,requested.identity);
+      if(requested.source==="cloudflare-workers-live-tail-receipt") {
+        // The file identifies a receipt; only the independently loaded Ops
+        // record is accepted. The pinned collector is the attestation source.
+        const publications=await verifyStorageAcceptedPublications({env,identity:storageExecutionIdentity(existing),runId,tickers,expectedSession:expected});
+        const runtime=await loadRuntimeTailReceipt(meteredOps,requested.identity,{evidenceHash:requested.evidenceHash,
+          publicationHash:await runtimeCandidatePublicationHash(publications),validationPlanHash});
+        await verifyRuntimeLiveVersion({accountId,token:process.env.CLOUDFLARE_API_TOKEN || token,identity:runtime.identity});
+        return runtime;
+      }
       // Authenticate the recorded window again; a local JSON hash is not remote
       // attestation. Missing or truncated logs must leave acceptance pending.
       const runtime=await collectRuntimeEvidence({accountId,token:process.env.CLOUDFLARE_API_TOKEN || token,
@@ -117,7 +128,7 @@ async function main():Promise<void> {
       if (plan.sessionDate!==expected || await storageHash(await loadEodInputs(env,expected))!==await storageHash(plan.inputs)) {
         throw new Error("storage-bootstrap-input-plan-changed");
       }
-      const runtime=await collectAuthenticatedRuntime(),analysis=file("EOD_STORAGE_ANALYSIS_PATH");
+      const runtime=await collectAuthenticatedRuntime(runId,tickers,expected,plan.planHash),analysis=file("EOD_STORAGE_ANALYSIS_PATH");
       const built=await buildStorageCutoverEvidence({env,identity:storageMigrationIdentity(existing),runId,tickers,expectedSession:expected,
         capture:captured,consumers:consumers.payload as StorageConsumerEvidence,
         analysis,publicationGrowth:file("EOD_STORAGE_PUBLICATION_GROWTH_PATH"),sourceSnapshotSha256,

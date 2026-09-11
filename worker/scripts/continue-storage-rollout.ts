@@ -10,12 +10,15 @@ import { resolveEodBudgetProfile } from "../src/eod-budget-profile";
 import { assertStorageExecutionRevision } from "../src/market-storage-execution";
 import { loadStorageMigration } from "../src/market-storage-control";
 import { storeEodControllerReport, type EodControllerReport } from "../src/eod-recovery-status";
+import { runtimeCandidateEvidenceFilename, runtimeCollectorOptions, runtimeCollectorCacheMatches, type RuntimeCollectorOptions } from "../src/eod-runtime-candidate";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const tmp = resolve(root, "worker/tmp");
 const configuration = z.object({ version: z.literal(1), codeRevision: z.string().regex(/^[a-f0-9]{40}$/),
   migrationId: z.string().regex(/^market-storage:[A-Za-z0-9._:-]+$/).optional(), storageCodeRevision: z.string().regex(/^[a-f0-9]{40}$/).optional(),
   budgetProfile: z.enum(["free","paid"]).optional(),
+  runtimeCollectionMode: z.enum(["telemetry", "live-tail"]).optional(),
+  runtimeAttempt: z.number().int().min(1).max(4).optional(),
   afterUtc: z.string().datetime(), accountId: z.string().regex(/^[a-f0-9]{32}$/), sourceDatabaseId: z.string().uuid(),
   historyDatabaseId: z.string().uuid(), opsDatabaseId: z.string().uuid(), coreDatabaseId: z.string().uuid(),
   snapshotPath: z.string(), historySnapshotPath: z.string(), frozenRunId: z.string().regex(/^eod:shadow:\d{4}-\d{2}-\d{2}:daily$/),
@@ -29,14 +32,15 @@ const read = (path: string): unknown => JSON.parse(readFileSync(path, "utf8").re
 
 async function main(): Promise<void> {
   const input = configuration.parse(read(safeFile(process.argv[2] ?? "worker/tmp/storage-recovery-config.json")));
+  const collectorOptions = runtimeCollectorOptions(input, process.env);
   if (new Set([input.sourceDatabaseId,input.historyDatabaseId,input.opsDatabaseId,input.coreDatabaseId]).size !== 4) throw new Error("storage-local-database-identity-conflict");
   const snapshot = safeFile(input.snapshotPath), historySnapshot = safeFile(input.historySnapshotPath);
   const statePath = resolve(tmp, "storage-recovery-status.json"), lockPath = resolve(tmp, "storage-recovery.lock");
   const logPath = resolve(tmp, "storage-recovery.log");
   mkdirSync(tmp, { recursive: true });
   const now = new Date();
-  const previous = existsSync(statePath) ? read(statePath) as LocalRecoveryResult & { codeRevision?: string } : null;
-  if (previous?.codeRevision === input.codeRevision && (previous.status === "paused"
+  const previous = existsSync(statePath) ? read(statePath) as LocalRecoveryResult & { codeRevision?: string } & Partial<RuntimeCollectorOptions> : null;
+  if (runtimeCollectorCacheMatches(previous, input.codeRevision, collectorOptions) && previous && (previous.status === "paused"
     || (previous.status === "waiting" && previous.nextAttemptAt && Date.parse(previous.nextAttemptAt) > now.getTime()))) {
     console.log(JSON.stringify({ status: previous.status, stage: previous.stage, nextAttemptAt: previous.nextAttemptAt, reason: previous.reason })); return;
   }
@@ -49,7 +53,7 @@ async function main(): Promise<void> {
   const save = (result: LocalRecoveryResult | { status: "running"; stage: string; nextAttemptAt: null; reason: string }) => {
     const temporary = statePath + ".next";
     pendingReport = { version: 1, ...result, codeRevision: input.codeRevision, updatedAt: new Date().toISOString() };
-    writeFileSync(temporary, JSON.stringify({ ...pendingReport, pid: process.pid }, null, 2));
+    writeFileSync(temporary, JSON.stringify({ ...pendingReport, ...collectorOptions, pid: process.pid }, null, 2));
     renameSync(temporary, statePath);
     console.log(JSON.stringify(result));
   };
@@ -204,7 +208,9 @@ async function main(): Promise<void> {
         const artifactDirectory = resolve(tmp,`storage-acceptance-${input.codeRevision.slice(0,12)}-${samples.rows[0].session_date}-${samples.samplesHash.slice(0,12)}`);
         mkdirSync(artifactDirectory,{recursive:true});
         env.EOD_STORAGE_PUBLICATION_GROWTH_PATH = resolve(artifactDirectory,"publication-growth.json");
-        env.EOD_STORAGE_RUNTIME_EVIDENCE_PATH = resolve(artifactDirectory,"runtime-evidence.json");
+        env.EOD_RUNTIME_COLLECTION_MODE = collectorOptions.runtimeCollectionMode;
+        env.EOD_RUNTIME_ATTEMPT = String(collectorOptions.runtimeAttempt);
+        env.EOD_STORAGE_RUNTIME_EVIDENCE_PATH = resolve(artifactDirectory, runtimeCandidateEvidenceFilename(Number(env.EOD_RUNTIME_ATTEMPT)));
         env.EOD_STORAGE_CUTOVER_EVIDENCE_PATH = resolve(artifactDirectory,"cutover-evidence.json");
         env.EOD_STORAGE_ANALYSIS_PATH = resolve(artifactDirectory,"storage-analysis.json");
         await phase("publication-growth");

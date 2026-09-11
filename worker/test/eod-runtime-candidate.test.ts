@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { parse } from "smol-toml";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { assertCandidateMigrationState, privateRuntimeAdminSecret, assertRuntimeCandidateCredentialBinding, prepareRuntimeCandidateConfig, runCandidateProbes, runtimeCandidateIdentity,
-  runtimeCandidatePublicationHash, assertRuntimeCandidateWindow, runtimeCandidateRequiresWindow, type CandidateProbeState } from "../src/eod-runtime-candidate";
+  runtimeCandidatePublicationHash, runtimeCandidateEvidenceFilename, runtimeCollectorOptions, runtimeCollectorCacheMatches,
+  assertRuntimeCandidateWindow, runtimeCandidateRequiresWindow, type CandidateProbeState } from "../src/eod-runtime-candidate";
 import type { StorageMigrationIdentity, StorageMigrationRun } from "../src/market-storage-control";
 import type { StoragePublicationEvidence } from "../src/market-storage-acceptance";
 import { resolveEodBudgetProfile } from "../src/eod-budget-profile";
@@ -18,6 +20,33 @@ function reviewed() {
     queues: { consumers: [{ queue: "live" }] }, triggers: { crons: ["* * * * *"] }, routes: ["live.example/*"], send_email: [{ name: "MAIL" }] };
 }
 describe("protected runtime candidate configuration", () => {
+  it("rechecks a paused local status after an explicit attempt change while keeping same-attempt caching and child defaults consistent", () => {
+    const codeRevision = "a".repeat(40), first = runtimeCollectorOptions({ runtimeCollectionMode: "live-tail" });
+    const previous = { status: "paused", codeRevision, ...first };
+    expect(runtimeCollectorCacheMatches(previous, codeRevision, first)).toBe(true);
+    const second = runtimeCollectorOptions({ runtimeAttempt: 2 }, { EOD_RUNTIME_COLLECTION_MODE: "live-tail", EOD_RUNTIME_ATTEMPT: "1" });
+    expect(runtimeCollectorCacheMatches(previous, codeRevision, second)).toBe(false);
+    expect(runtimeCandidateEvidenceFilename(second.runtimeAttempt)).toBe("runtime-evidence-attempt-2.json");
+    expect(runtimeCollectorOptions({})).toEqual({ runtimeCollectionMode: "telemetry", runtimeAttempt: 1 });
+    expect(runtimeCollectorCacheMatches({ codeRevision }, codeRevision, runtimeCollectorOptions({}))).toBe(true);
+    expect(runtimeCollectorCacheMatches({ codeRevision }, codeRevision, first)).toBe(false);
+    expect(() => runtimeCollectorOptions({}, { EOD_RUNTIME_ATTEMPT: "5" })).toThrow("attempt-invalid");
+    expect(() => runtimeCollectorOptions({}, { EOD_RUNTIME_COLLECTION_MODE: "unknown" })).toThrow("mode-invalid");
+  });
+  it("preserves an earlier complete artifact when the same publication uses a new bounded attempt", async () => {
+    const directory = mkdtempSync(resolve(tmpdir(), "runtime-artifact-attempt-"));
+    try {
+      const first = await identity(), second = await runtimeCandidateIdentity({ migration, sessionDate: "2026-09-10",
+        opsDatabaseId: uuid(4), coreDatabaseId: uuid(5), attempt: 2 });
+      const old = { complete: true, identity: first, publicationHash: "b".repeat(64), collectedAt: "2026-09-10T21:00:00.000Z" };
+      writeFileSync(resolve(directory, runtimeCandidateEvidenceFilename(1)), JSON.stringify(old), { flag: "wx" });
+      writeFileSync(resolve(directory, runtimeCandidateEvidenceFilename(2)), JSON.stringify({ ...old, identity: second }), { flag: "wx" });
+      expect(JSON.parse(readFileSync(resolve(directory, runtimeCandidateEvidenceFilename(1)), "utf8"))).toEqual(old);
+      expect(JSON.parse(readFileSync(resolve(directory, runtimeCandidateEvidenceFilename(2)), "utf8")).identity.probeId).toBe(second.probeId);
+      expect(second.probeId).not.toBe(first.probeId);
+      for (const invalid of [0, 5, 1.5, NaN]) expect(() => runtimeCandidateEvidenceFilename(invalid)).toThrow("attempt-invalid");
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+  });
   it("preserves the paid profile and rejects measurements under a different profile", async () => {
     const paidIdentity=await runtimeCandidateIdentity({migration,sessionDate:migration.sessionDate,
       opsDatabaseId:uuid(4),coreDatabaseId:uuid(5),budgetProfile:"paid"});
@@ -162,5 +191,30 @@ describe("candidate HTTP protocol", () => {
   it("resumes completed samples without replay and retains the five-request bound", async () => {
     const options = await fixture(), complete = await runCandidateProbes(options); options.fetcher.mockClear();
     await runCandidateProbes({ ...options, state: complete }); expect(options.fetcher).not.toHaveBeenCalled();
+  });
+  it("correlates live requests with returned platform ray IDs and cannot resume them through a new stream", async () => {
+    const options = await fixture();
+    const liveRequests = ["/api/dashboard", "/api/dashboard", "/api/breadth/dashboard", "/api/breadth/dashboard", "/api/admin/eod/runtime-probe/coordinator"]
+      .map((route, i) => ({ route, nonce: uuid(i + 40) }));
+    let count = 0;
+    options.fetcher.mockImplementation(async () => Response.json({ ok: true }, { headers: { "cf-ray": `${String(++count).padStart(16, "0")}-SYD` } }));
+    const healthy = vi.fn(), result = await runCandidateProbes({ ...options, liveRequests, assertStreamHealthy: healthy });
+    expect(result.probes.map(row => row.nonce)).toEqual(liveRequests.map(row => row.nonce));
+    expect(result.probes.map(row => row.requestId)).toEqual([1, 2, 3, 4, 5].map(value => String(value).padStart(16, "0")));
+    expect(healthy).toHaveBeenCalledTimes(10);
+    const calls = options.fetcher.mock.calls as unknown as Array<[URL, RequestInit]>;
+    expect(calls.map(([, init]) => new Headers(init.headers).get("x-eod-runtime-request-id"))).toEqual(liveRequests.map(row => row.nonce));
+    options.fetcher.mockClear();
+    await expect(runCandidateProbes({ ...options, state: result, liveRequests })).rejects.toThrow("fresh-five");
+    expect(options.fetcher).not.toHaveBeenCalled();
+  });
+  it("stops before the next live request if its ray ID is absent or the stream disconnects", async () => {
+    const options = await fixture(), liveRequests = ["/api/dashboard", "/api/dashboard", "/api/breadth/dashboard", "/api/breadth/dashboard", "/api/admin/eod/runtime-probe/coordinator"]
+      .map((route, i) => ({ route, nonce: uuid(i + 40) }));
+    await expect(runCandidateProbes({ ...options, liveRequests })).rejects.toThrow("collect-diagnostics");
+    expect(options.fetcher).toHaveBeenCalledOnce();
+    options.fetcher.mockClear();
+    await expect(runCandidateProbes({ ...options, liveRequests, assertStreamHealthy: () => { throw new Error("stream-disconnected"); } })).rejects.toThrow("stream-disconnected");
+    expect(options.fetcher).not.toHaveBeenCalled();
   });
 });

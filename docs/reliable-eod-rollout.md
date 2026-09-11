@@ -1,6 +1,6 @@
 # Reliable EOD rollout
 
-This is an operator runbook, not evidence of a completed cutover. The checked-in configuration now selects `EOD_RUNNER_MODE="shadow"`, with `EOD_READ_ENABLED="false"` and `EOD_ARCHIVE_PRUNE_ENABLED="false"`. New installations must keep the runner disabled until provisioning is verified; this repository has reached shadow validation. See the [production release record](reliable-eod-production-release.md) for actual provisioning, migration and deployment progress. Pruning and technical production acceptance remain gated; no elapsed observation period is required.
+This is an operator runbook, not evidence of a completed cutover. New installations keep the runner disabled until provisioning is verified, then validate in shadow mode with publication reads and pruning disabled. Successful recovery promotes the verified target and records a separate canonical production configuration. Inspect Admin's EOD recovery record and the actual deployed Worker bindings for current state; a historical release entry or a successful deployment alone does not establish completion. See the [production release record](reliable-eod-production-release.md) for dated progress. Pruning and technical production acceptance remain gated; no elapsed observation period is required.
 
 ## Stage 1 — Inventory, capacity and shared quota
 

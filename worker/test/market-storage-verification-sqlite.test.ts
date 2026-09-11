@@ -38,7 +38,8 @@ async function fixture(options:{baseline?:boolean;archive?:boolean;supportRows?:
       +(options.supportRows ? `WITH RECURSIVE rows(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM rows WHERE n+1<${options.supportRows})
         INSERT INTO overview_provider_catalog_cache SELECT printf('p%04d',n),'2026-09-08','[]','2026-09-09' FROM rows;` : "");
     source.script(schema+common+sourcePrices+triggers);target.script(schema+common+targetPrices+triggers);
-    history.migrate("history-migrations");ops.script(readFileSync("ops-migrations/0010_market_storage_migrations.sql","utf8")
+    history.migrate("history-migrations");ops.script(readFileSync("ops-migrations/0007_eod_account_usage.sql","utf8")
+      +readFileSync("ops-migrations/0010_market_storage_migrations.sql","utf8")
       +readFileSync("ops-migrations/0011_market_storage_execution.sql","utf8"));
     const prior=await copyStorageArchiveBlock(history.db,[oldBar("2026-01-02"),oldBar("2026-09-08")]);
     // Preserve a superseded immutable revision as well as current pointer rows.

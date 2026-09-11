@@ -6,7 +6,8 @@ import { createEodAdmission, createEodD1Database } from "../src/eod-d1-rest";
 import { resolveEodBudgetProfile } from "../src/eod-budget-profile";
 import { reconcileEodAccountUsage } from "../src/eod-account-usage";
 import { approveStorageExecutionTransition } from "../src/market-storage-execution";
-import { loadStorageMigration, resumeStorageMigration } from "../src/market-storage-control";
+import { loadStorageMigration, resumeStorageMigration, storageMigrationIdentity } from "../src/market-storage-control";
+import { createStorageWorkflowQuiescence } from "../src/market-storage-github-revocation";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const required = (name: string) => { const value = process.env[name]?.trim(); if (!value) throw new Error("storage-execution-setting-missing"); return value; };
@@ -34,19 +35,6 @@ async function main(): Promise<void> {
       || git("status","--porcelain") || object(gh(`repos/${repository}/git/ref/heads/main`).object)?.sha !== codeRevision) throw new Error("storage-execution-clean-github-main-required");
     if (git("merge-base",fromRevision,codeRevision) !== fromRevision) throw new Error("storage-execution-ancestor-required");
   };
-  const assertNoWorkflowWriters = async () => {
-    for (const workflow of ["eod-storage-migration.yml","eod-market-data.yml"]) {
-      const body = gh(`repos/${repository}/actions/workflows/${workflow}/runs?per_page=100`);
-      if (!Array.isArray(body.workflow_runs) || typeof body.total_count !== "number") throw new Error("storage-execution-workflow-inventory-invalid");
-      if (body.workflow_runs.some((run) => object(run)?.status !== "completed")) throw new Error("storage-execution-workflow-writer-active");
-      // GitHub orders newest first; inspect all live states independently so an
-      // old waiting job cannot hide beyond the bounded recent history page.
-      for (const status of ["queued","in_progress","waiting","pending","requested"]) {
-        const active = gh(`repos/${repository}/actions/workflows/${workflow}/runs?status=${status}&per_page=1`);
-        if (active.total_count !== 0 || !Array.isArray(active.workflow_runs) || active.workflow_runs.length) throw new Error("storage-execution-workflow-writer-active");
-      }
-    }
-  };
   const variables = () => {
     const body = gh(`repos/${repository}/environments/market-eod/variables?per_page=100`);
     if (!Array.isArray(body.variables) || body.total_count !== body.variables.length) throw new Error("storage-execution-github-variables-incomplete");
@@ -67,6 +55,22 @@ async function main(): Promise<void> {
       || vars.get("EOD_STORAGE_CODE_REVISION") !== run.code_revision || vars.get("EOD_STORAGE_TARGET_DATABASE_ID") !== target
       || vars.get("EOD_STORAGE_SOURCE_DATABASE_ID") !== source || vars.get("EOD_HISTORY_DATABASE_ID") !== history
       || vars.get("EOD_OPS_DATABASE_ID") !== opsId || vars.get("CLOUDFLARE_ACCOUNT_ID") !== accountId) throw new Error("storage-execution-durable-identity-conflict");
+    // Only an explicit exact run ID may receive the zero-allocation exception.
+    // Denial is global to that GitHub run, while the evidence records this
+    // reviewed operator migration. GitHub exposes no inputs for a ghost run.
+    const revokeRunId = process.env.EOD_STORAGE_REVOKE_UNALLOCATED_RUN_ID;
+    if (revokeRunId !== undefined) {
+      // The old checkout must already gate ingestion on its actual revision.
+      // This supplements the reviewed ancestor/diff and immutable lineage: a
+      // delayed old checkout cannot claim after the approval CAS changes it.
+      const oldRunner = command("git",["show",`${fromRevision}:worker/scripts/market-storage-runner.ts`]);
+      const oldControl = command("git",["show",`${fromRevision}:worker/src/market-storage-control.ts`]);
+      if (!oldRunner.includes("await assertStorageExecutionRevision(meteredOps,existing,codeRevision)")
+        || !oldRunner.includes("githubRunId:process.env.GITHUB_RUN_ID,executionRevision:codeRevision")
+        || !oldControl.includes("COALESCE(execution_revision,code_revision)=?")) throw new Error("storage-execution-old-runner-revision-fence-required");
+    }
+    const assertNoWorkflowWriters = createStorageWorkflowQuiescence({ops,repository,migration:storageMigrationIdentity(run),
+      fromRevision,codeRevision,revokeRunId,readGitHub:async path=>gh(path)});
     const record = await approveStorageExecutionTransition({ops,source:db(source),migrationId:id,fromRevision,codeRevision,
       changedFiles,diffHash:createHash("sha256").update(diff).digest("hex"),assertReviewedCheckout,assertNoWorkflowWriters});
     command("gh",["variable","set","EOD_STORAGE_EXECUTION_REVISION","--env","market-eod","--repo",repository,"--body",codeRevision]);

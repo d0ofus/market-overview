@@ -11,16 +11,20 @@ const identitySchema=z.object({probeId:z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_
 export type RuntimeEvidenceIdentity=z.infer<typeof identitySchema>;
 const statsSchema=z.object({queries:finite.int(),rowsRead:finite.int(),rowsWritten:finite.int(),maxQueryDurationMs:finite,
   missingMetadata:finite.int(),failedQueries:finite.int()}).strict();
-const summarySchema=z.object({event:z.literal("eod-runtime-probe-v1"),probeId:z.string(),sampleId:z.string().uuid(),
+export const runtimeSummarySchema=z.object({event:z.literal("eod-runtime-probe-v1"),probeId:z.string(),sampleId:z.string().uuid(),
   category:z.enum(["http","coordinator"]),route:z.string(),codeRevision:z.string(),workerVersion:z.string(),targetDatabaseId:z.string(),
   eodReadEnabled:z.boolean(),startedAt:z.string().datetime(),finishedAt:z.string().datetime(),outcome:z.enum(["ok","error"]),
   complete:z.boolean(),stats:statsSchema,cpuSource:z.literal("cloudflare-invocation-log-required")}).strict();
+const summarySchema=runtimeSummarySchema;
 const sampleSchema=z.object({summary:summarySchema,requestId:z.string().min(1),cpuTimeMs:finite,outcome:z.literal("ok")}).strict();
-const artifactSchema=z.object({schemaVersion:z.literal(1),source:z.literal("cloudflare-workers-raw-invocation-logs"),
+const liveTailSchema=z.object({receiptId:z.string().min(1),attemptHash:z.string().regex(/^[a-f0-9]{64}$/),
+  publicationHash:z.string().regex(/^[a-f0-9]{64}$/),validationPlanHash:z.string().regex(/^[a-f0-9]{64}$/),
+  connectedAt:z.string().datetime(),closedAt:z.string().datetime(),probeUntil:z.string().datetime()}).strict();
+const artifactSchema=z.object({schemaVersion:z.literal(1),source:z.enum(["cloudflare-workers-raw-invocation-logs","cloudflare-workers-live-tail-receipt"]),
   identity:identitySchema,collectedAt:z.string().datetime(),window:z.object({from:finite,to:finite}).strict(),
   versionBindings:z.record(z.string()),complete:z.boolean(),unavailableReasons:z.array(z.string()),samples:z.array(sampleSchema).max(EOD_RUNTIME_PROBE_LIMIT),
   measurements:z.object({httpCpuMs:finite.nullable(),coordinatorCpuMs:finite.nullable(),queriesPerInvocation:finite.int().nullable(),
-    queryDurationMs:finite.nullable()}).strict(),evidenceHash:z.string().regex(/^[a-f0-9]{64}$/)}).strict();
+    queryDurationMs:finite.nullable()}).strict(),liveTail:liveTailSchema.optional(),evidenceHash:z.string().regex(/^[a-f0-9]{64}$/)}).strict();
 export type RuntimeEvidence=z.infer<typeof artifactSchema>;
 type LogEvent={source?:unknown;$metadata?:{requestId?:string;service?:string;id?:string;statusCode?:number;type?:string};
   $workers?:{requestId?:string;scriptName?:string;scriptVersion?:{id?:string};cpuTimeMs?:number;outcome?:string;truncated?:boolean;
@@ -60,23 +64,29 @@ function assertBindings(id:RuntimeEvidenceIdentity,bindings:Record<string,string
     throw new Error("runtime-version-binding-mismatch:EOD_BUDGET_PROFILE");
   }
 }
-function summarize(samples:RuntimeEvidence["samples"]):RuntimeEvidence["measurements"] {
+export function summarizeRuntimeSamples(samples:RuntimeEvidence["samples"]):RuntimeEvidence["measurements"] {
   const maximum=(values:number[])=>values.length?Math.max(...values):null;
   return {httpCpuMs:maximum(samples.filter((row)=>row.summary.category==="http").map((row)=>row.cpuTimeMs)),
     coordinatorCpuMs:maximum(samples.filter((row)=>row.summary.category==="coordinator").map((row)=>row.cpuTimeMs)),
     queriesPerInvocation:maximum(samples.map((row)=>row.summary.stats.queries)),
     queryDurationMs:maximum(samples.map((row)=>row.summary.stats.maxQueryDurationMs))};
 }
+const summarize=summarizeRuntimeSamples;
 function coverage(samples:RuntimeEvidence["samples"]):string[] {
   return [...EOD_RUNTIME_HTTP_PATHS,EOD_RUNTIME_COORDINATOR_PATH].flatMap((route)=>{
     const count=samples.filter((row)=>row.summary.route===route).length,minimum=route===EOD_RUNTIME_COORDINATOR_PATH?1:2;
     return count<minimum?[`runtime-samples-missing:${route}:${count}/${minimum}`]:[];
   });
 }
-/** Strict local integrity validation. Acceptance must also re-collect from the
- * authenticated Cloudflare API; a locally supplied JSON file is not an attestation. */
+/** Local integrity only. Acceptance must additionally re-fetch historical logs
+ * or load the immutable trusted live collector receipt from Ops. */
 export async function validateRuntimeEvidence(value:unknown,expected:RuntimeEvidenceIdentity):Promise<RuntimeEvidence> {
   const parsed=artifactSchema.parse(value);identitySchema.parse(expected);
+  if(parsed.source==="cloudflare-workers-live-tail-receipt") {
+    if(!parsed.liveTail || parsed.samples.length!==5 || Date.parse(parsed.liveTail.connectedAt)>parsed.window.from
+      || Date.parse(parsed.liveTail.closedAt)<parsed.window.to || Date.parse(parsed.collectedAt)<Date.parse(parsed.liveTail.closedAt)
+      || Date.parse(parsed.liveTail.probeUntil)<parsed.window.to)throw new Error("runtime-tail-evidence-window-invalid");
+  } else if(parsed.liveTail)throw new Error("runtime-evidence-source-conflict");
   if(JSON.stringify(parsed.identity)!==JSON.stringify(identitySchema.parse(expected)))throw new Error("runtime-evidence-identity-mismatch");
   assertBindings(parsed.identity,parsed.versionBindings);
   const {evidenceHash,...body}=parsed;

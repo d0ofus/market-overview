@@ -59,6 +59,17 @@ describe("execution revision transitions preserve populated migration evidence",
     await expect(approveStorageExecutionTransition(input())).rejects.toThrow("live-writer");
     expect((await loadStorageMigration(ops.db,identity.id))?.execution_revision).toBeNull();
   });
+  it("rejects promotion when an old runner wins the lease after the first quiescence check", async () => {
+    const config = input();
+    config.assertNoWorkflowWriters.mockImplementationOnce(async () => undefined).mockImplementationOnce(async () => {
+      await resumeStorageMigration(ops.db,identity.id,origin);
+      expect(await claimStorageMigration(ops.db,identity.id,{githubRunId:"34569828764",executionRevision:origin})).not.toBeNull();
+    });
+    await expect(approveStorageExecutionTransition(config)).rejects.toThrow("promotion-conflict");
+    expect(await loadStorageMigration(ops.db,identity.id)).toMatchObject({execution_revision:null,status:"running",github_run_id:"34569828764"});
+    expect(await source.db.prepare("SELECT status,code_revision,revision,snapshot_revision FROM market_storage_fence").first())
+      .toMatchObject({status:"frozen",code_revision:origin,revision:0,snapshot_revision:0});
+  });
   it("rejects source unfreezing and refuses to reuse completed consumer/bootstrap proof under new code", async () => {
     source.script("UPDATE market_storage_fence SET status='open' WHERE id='default';");
     await expect(approveStorageExecutionTransition(input())).rejects.toThrow("source-capture-changed");

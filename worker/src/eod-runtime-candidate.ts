@@ -39,6 +39,24 @@ export type CandidateIdentity = Omit<RuntimeEvidenceIdentity, "workerVersion"> &
 };
 export type CandidateConfig = Record<string, unknown> & { name: string; vars: Record<string, string>; d1_databases: Array<Record<string, unknown>> };
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
+export function runtimeCandidateEvidenceFilename(attempt: number): string {
+  if (!Number.isInteger(attempt) || attempt < 1 || attempt > 4) throw new Error("runtime-candidate-attempt-invalid");
+  return `runtime-evidence-attempt-${attempt}.json`;
+}
+export type RuntimeCollectorOptions = { runtimeCollectionMode: "telemetry" | "live-tail"; runtimeAttempt: number };
+export function runtimeCollectorOptions(input: Partial<RuntimeCollectorOptions>, environment: Record<string, string | undefined> = {}): RuntimeCollectorOptions {
+  const runtimeCollectionMode = input.runtimeCollectionMode ?? environment.EOD_RUNTIME_COLLECTION_MODE ?? "telemetry";
+  const runtimeAttempt = input.runtimeAttempt ?? Number(environment.EOD_RUNTIME_ATTEMPT ?? "1");
+  if (runtimeCollectionMode !== "telemetry" && runtimeCollectionMode !== "live-tail") throw new Error("runtime-candidate-collection-mode-invalid");
+  runtimeCandidateEvidenceFilename(runtimeAttempt);
+  return { runtimeCollectionMode, runtimeAttempt };
+}
+export function runtimeCollectorCacheMatches(previous: { codeRevision?: unknown; runtimeCollectionMode?: unknown; runtimeAttempt?: unknown } | null,
+  codeRevision: string, options: RuntimeCollectorOptions): boolean {
+  return Boolean(previous && previous.codeRevision === codeRevision
+    && (previous.runtimeCollectionMode ?? "telemetry") === options.runtimeCollectionMode
+    && (previous.runtimeAttempt ?? 1) === options.runtimeAttempt);
+}
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("runtime-candidate-object-invalid");
   return value as Record<string, unknown>;
@@ -144,29 +162,41 @@ export function assertRuntimeCandidateCredentialBinding(fingerprint: string, sta
 }
 
 export type CandidateProbeState = { from: number; to: number | null; probes: Array<{
-  route: string; status: "started" | "ok" | "failed"; startedAt: string; finishedAt?: string;
+  route: string; status: "started" | "ok" | "failed"; startedAt: string; finishedAt?: string; nonce?: string; requestId?: string;
 }> };
 export async function runCandidateProbes(input: { identity: CandidateIdentity; baseUrl: string; adminSecret: string;
   state: CandidateProbeState; save: (state: CandidateProbeState) => Promise<void>; assertEligible: () => Promise<void>;
   assertCurrentVersion: () => Promise<void>; fetcher?: typeof fetch; now?: () => Date;
+  liveRequests?: Array<{ route: string; nonce: string }>; assertStreamHealthy?: () => void;
 }): Promise<CandidateProbeState> {
   const base = new URL(input.baseUrl), clock = input.now ?? (() => new Date()), state = structuredClone(input.state);
   if (base.protocol !== "https:" || base.username || base.password || base.pathname !== "/" || base.search || base.hash
     || !base.hostname.startsWith(input.identity.workerName + ".") || !base.hostname.endsWith(".workers.dev") || !input.adminSecret) throw new Error("runtime-candidate-probe-origin-invalid");
   const routes = [EOD_RUNTIME_HTTP_PATHS[0], EOD_RUNTIME_HTTP_PATHS[0], EOD_RUNTIME_HTTP_PATHS[1], EOD_RUNTIME_HTTP_PATHS[1], EOD_RUNTIME_COORDINATOR_PATH];
+  if (input.liveRequests && (state.probes.length || input.liveRequests.length !== 5
+    || input.liveRequests.some((request, i) => request.route !== routes[i] || !uuid.test(request.nonce))
+    || new Set(input.liveRequests.map(request => request.nonce)).size !== 5)) throw new Error("runtime-tail-fresh-five-request-manifest-required");
   if (state.probes.length > routes.length || state.probes.some((probe, index) => probe.route !== routes[index] || probe.status !== "ok")) {
     throw new Error("runtime-candidate-interrupted-probe-collect-or-new-attempt");
   }
   await input.assertEligible(); await input.assertCurrentVersion();
   for (let index = state.probes.length; index < routes.length; index++) {
+    input.assertStreamHealthy?.();
     const route = routes[index], probe: CandidateProbeState["probes"][number] = { route, status: "started", startedAt: clock().toISOString() };
+    if (input.liveRequests) probe.nonce = input.liveRequests[index].nonce;
     state.probes.push(probe); await input.save(state); // Claim before HTTP; a timeout is never replayed blindly.
     try {
       const response = await (input.fetcher ?? fetch)(new URL(route, base), { method: route === EOD_RUNTIME_COORDINATOR_PATH ? "POST" : "GET",
-        headers: { Authorization: `Bearer ${input.adminSecret}`, "x-eod-runtime-probe": input.identity.probeId },
+        headers: { Authorization: `Bearer ${input.adminSecret}`, "x-eod-runtime-probe": input.identity.probeId,
+          ...(probe.nonce ? { "x-eod-runtime-request-id": probe.nonce } : {}) },
         redirect: "error", signal: AbortSignal.timeout(60_000) });
       if (response.status !== 200 || response.headers.get("x-dashboard-stale-fallback") || !response.headers.get("content-type")?.includes("application/json")) {
         await response.body?.cancel(); throw new Error("runtime-candidate-probe-http-failed");
+      }
+      if (probe.nonce) {
+        const ray = response.headers.get("cf-ray");
+        if (!ray || !/^[a-f0-9]{16}(?:-[A-Z]{3})?$/i.test(ray)) { await response.body?.cancel(); throw new Error("runtime-tail-request-correlation-missing"); }
+        probe.requestId = ray.split("-")[0].toLowerCase();
       }
       const reader = response.body?.getReader(); let bytes = 0;
       if (reader) for (;;) {
@@ -175,6 +205,7 @@ export async function runCandidateProbes(input: { identity: CandidateIdentity; b
         if (bytes > 16 * 1024 * 1024) { await reader.cancel(); throw new Error("runtime-candidate-response-too-large"); }
       }
       probe.status = "ok"; probe.finishedAt = clock().toISOString(); await input.save(state);
+      input.assertStreamHealthy?.();
     } catch { probe.status = "failed"; probe.finishedAt = clock().toISOString(); state.to = clock().getTime(); await input.save(state); throw new Error("runtime-candidate-probe-failed-collect-diagnostics"); }
   }
   state.to = clock().getTime(); await input.save(state);

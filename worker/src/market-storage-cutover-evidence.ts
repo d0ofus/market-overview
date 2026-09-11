@@ -57,8 +57,9 @@ export async function collectStorageCutoverUsage(ops: D1Database, now = new Date
 }
 
 /** Read-only assembly, with no caller-provided success flags or metric counts.
- * runtime must be re-collected using authenticated Cloudflare APIs by the CLI;
- * its local checksum alone is not remote attestation. The source fence is the
+ * The CLI must re-collect authenticated historical logs or independently load
+ * the trusted live collector's immutable Ops receipt and recheck its active
+ * version/publications. A local checksum alone is not attestation. The source fence is the
  * original immutable copy baseline; target/history legitimately change during
  * private bootstrap, whose current accepted publications are checked here. */
 export async function buildStorageCutoverEvidence(input: {
@@ -134,7 +135,7 @@ export async function buildStorageCutoverEvidence(input: {
     scopes: EOD_PUBLICATION_SCOPES.map((scope) => ({ scope, publicationId: publications.scopes.find((row) => row.scope === scope)!.id,
       sessionDate: input.expectedSession })), limits: profile.runtime,
     measurements: { ...usage.measurements, ...runtime.measurements,
-      source: "Cloudflare raw invocation logs; D1 account analytics and conservative local high-water ledger; real SQLite full dual-feed layout plus measured publication growth" },
+      source: `${runtime.source === "cloudflare-workers-live-tail-receipt" ? "Cloudflare live-tail CPU and trusted pinned-collector Ops receipt" : "Cloudflare authenticated historical invocation logs"}; D1 account analytics and conservative local high-water ledger; real SQLite full dual-feed layout plus measured publication growth` },
     // The legacy rollout schema expects a storage layout. These are the actual
     // measured full-population fixture and its separately measured publication
     // reserve. Equal row counts preserve that exact model without extrapolation.

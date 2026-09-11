@@ -1,7 +1,7 @@
 import type { Env } from "./types";
 import * as XLSX from "xlsx";
 import { ETF_CATALOG_BY_TICKER } from "./etf-catalog";
-import { etfHoldingsIssue, etfHoldingsDateIssue, etfHoldingAssetType, getEtfLifecycle, parseEtfHoldingsDate, type EtfHoldingAssetType } from "./etf-holdings-quality";
+import { etfHoldingsIssue, etfHoldingsDateIssue, etfHoldingAssetType, getEtfLifecycle, parseEtfHoldingsDate, ssgaCurrencyIdentity, type EtfHoldingAssetType } from "./etf-holdings-quality";
 
 export type EtfConstituent = {
   ticker: string;
@@ -1368,6 +1368,7 @@ export function parseSsgaHoldingsFile(etfTicker: string, buffer: ArrayBuffer, ki
   if (dateIssue) throw new Error(dateIssue);
   const header = findSsgaHeaderIndexes(rows);
   if (!header) throw new Error("ssga-holdings-header-missing");
+  const identifierIndex = rows[header.headerRowIndex].findIndex(value => String(value ?? "").trim().toLowerCase() === "identifier");
   const holdings: EtfConstituent[] = [];
   for (const row of rows.slice(header.headerRowIndex + 1)) {
     let ticker = normalizeTicker(String(row[header.tickerIdx] ?? ""));
@@ -1379,9 +1380,11 @@ export function parseSsgaHoldingsFile(etfTicker: string, buffer: ArrayBuffer, ki
       continue;
     }
     const name = header.nameIdx >= 0 ? String(row[header.nameIdx] ?? "").trim() : "";
-    // The issuer uses '-' for both this currency balance and its money-market
-    // fund. USD is the reported currency identity, not a manufactured equity.
-    if (ticker === "-" && name === "US DOLLAR") ticker = "USD";
+    // Preserve currency and nontradable source identities rather than treating
+    // every '-' position as the same security or silently dropping it.
+    if (ticker === "-") ticker = ssgaCurrencyIdentity(name) ?? ticker;
+    if (ticker === "-" && etfTicker === "XLP" && name === "CONTRA WALGREENS BOOTS"
+      && String(row[identifierIndex] ?? "").trim() === "931CVR013") ticker = "931CVR013";
     const assetType = etfHoldingAssetType(etfTicker, { ticker, name, source: "ssga:fund-data" });
     if ((ticker === "-" && assetType !== "money_market") || weight === null) throw new Error("ssga-holdings-position-identity-invalid");
     holdings.push({ ticker, name: name || null, weight, assetType });

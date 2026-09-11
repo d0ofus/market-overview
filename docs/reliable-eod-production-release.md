@@ -2,6 +2,16 @@
 
 Release started 9 September 2026, Australia/Sydney. Production deployment was explicitly authorized. This record distinguishes deployed infrastructure from the remaining live acceptance gates.
 
+## 11 September Paid recovery follow-up
+
+At 06:12 UTC, application revision `25b66106a435da67cce7c19a106cfd793af40067` was verified on Worker version `355a002f-028c-4fba-b379-dd7781a52bb0`; its Vercel Production deployment also succeeded. Actual Worker settings selected the Paid budget profile and a 1,000 ms CPU limit, while retaining shadow mode, disabled publication reads and disabled pruning. The Paid profile changes execution budgets; the storage design still requires 90 recent sessions, preserved archive history and measured capacity below the existing 350 MB targets.
+
+Migration `market-storage:2026-09-08:2895f501fe75` preserved its original source revision and all 34 resumable checkpoints through the reviewed executor transition. The archive-copy stage reported 1,990,234 retained observations; supporting-table copying and independent whole-copy verification were still pending. This is copy progress, not accepted archival parity or public delivery. The original database remained intact.
+
+At 06:46 UTC, [the resumed copy](https://github.com/d0ofus/market-overview/actions/runs/34569828764) completed successfully: 32 supporting tables contained 192,482 copied rows, alongside the retained archive observations. The durable migration released its lease and queued independent whole-copy verification. Public cutover remained pending that verification and the subsequent population, runtime and publication checks.
+
+The revised membership parsers retain dated issuer evidence, common-share class aliases and unresolved coverage. The actual holdings refresh restored current official XLC, XLE, XLRE and XLV snapshots; seven other sectors exposed further valid non-equity positions requiring classification fixes. Their older snapshots retained their original dates. Subsequent acceptance must use the final reviewed executor, current full-universe inputs, independently verified history, actual runtime measurements and accepted publications. Admin's durable recovery and production-configuration records identify completion; no observation period is required.
+
 ## 9 September credential follow-up and first shadow attempt
 
 GitHub CLI workflow authorization is now complete. The user rotated the Alpaca pair in `market-command-worker` and added both environment secrets to `market-eod`; secret names were verified without retrieving values. The Worker's GitHub dispatch token was refreshed. Commit `d52f2e9c813320ed6cc3483186fd66025b22f0ce` published the executable `.github/workflows/eod-market-data.yml`; its Vercel Production deployment reported success.

@@ -3731,6 +3731,7 @@ app.get("/api/etf/:ticker/constituents", async (c) => {
         : row.assetType === "crypto" ? "crypto-asset-no-equity-quote"
         : row.assetType === "derivative" ? "derivative-asset-no-equity-quote"
         : row.assetType === "money_market" ? "money-market-asset-no-equity-quote"
+        : row.assetType === "corporate_action" ? "corporate-action-asset-no-equity-quote"
         : row.assetType === "cash" ? "cash-asset-no-equity-quote" : "physical-asset-no-equity-quote",
     };
   });

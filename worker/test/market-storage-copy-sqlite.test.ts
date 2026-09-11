@@ -93,7 +93,8 @@ describe("reviewed market storage copy on real schema",{timeout:30_000},() => {
         +readFileSync("market-data-migrations/0009_market_storage_fence.sql","utf8")
         +"CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE,applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL);"
         +"INSERT INTO d1_migrations(name) VALUES('0009_market_storage_fence.sql');");
-      history.migrate("history-migrations");ops.script(readFileSync("ops-migrations/0010_market_storage_migrations.sql","utf8")
+      history.migrate("history-migrations");ops.script(readFileSync("ops-migrations/0007_eod_account_usage.sql","utf8")
+        +readFileSync("ops-migrations/0010_market_storage_migrations.sql","utf8")
         +readFileSync("ops-migrations/0011_market_storage_execution.sql","utf8"));
       await source.db.prepare("INSERT INTO eod_input_clock VALUES('default',0)").run();
       await source.db.batch([source.db.prepare("INSERT INTO alpaca_daily_bars(feed,ticker,date,o,h,l,c) VALUES('sip','TEST','2025-12-31',10,10,10,10)"),

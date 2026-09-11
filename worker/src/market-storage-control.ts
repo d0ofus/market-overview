@@ -1,5 +1,6 @@
 import type { Env } from "./types";
 import { releaseStorageSourceFence } from "./market-storage-fence";
+import { storageGitHubRevocationKey } from "./market-storage-github-revocation";
 
 export type StorageMigrationIdentity = {
   id: string; sourceDatabaseId: string; targetDatabaseId: string; historyDatabaseId: string;
@@ -64,14 +65,16 @@ export async function createStorageMigration(ops: D1Database, input: StorageMigr
 export async function claimStorageMigration(ops: D1Database,id: string, options: {githubRunId?: string;executionRevision?:string;now?: Date} = {}): Promise<{run:StorageMigrationRun;leaseToken:string}|null> {
   validId(id);
   const now=options.now ?? new Date(), timestamp=now.toISOString(), token=crypto.randomUUID();
-  if (options.githubRunId && !/^\d+$/.test(options.githubRunId)) throw new Error("storage-migration-invalid-github-run");
+  if (options.githubRunId !== undefined && !/^[1-9]\d{0,19}$/.test(options.githubRunId)) throw new Error("storage-migration-invalid-github-run");
+  const revocationKey = options.githubRunId === undefined ? null : storageGitHubRevocationKey(options.githubRunId);
   const result=await ops.prepare(`UPDATE market_storage_migrations SET status='running',lease_token=?,lease_until=?,
     github_run_id=COALESCE(?,github_run_id),dispatch_token=NULL,updated_at=? WHERE id=?
     AND status IN ('queued','dispatching','dispatched','running','retrying')
     AND (? IS NULL OR COALESCE(execution_revision,code_revision)=?)
+    AND (? IS NULL OR NOT EXISTS(SELECT 1 FROM eod_rollout_evidence WHERE id=?))
     AND (lease_until IS NULL OR lease_until<=?) AND (next_attempt_at IS NULL OR next_attempt_at<=? OR status IN ('dispatching','dispatched'))`)
     .bind(token,new Date(now.getTime()+STORAGE_LEASE_MS).toISOString(),options.githubRunId ?? null,timestamp,id,
-      options.executionRevision ?? null,options.executionRevision ?? null,timestamp,timestamp).run();
+      options.executionRevision ?? null,options.executionRevision ?? null,revocationKey,revocationKey,timestamp,timestamp).run();
   const run=await loadStorageMigration(ops,id);
   if (!run) throw new Error("storage-migration-run-missing");
   return result.meta.changes ? {run,leaseToken:token} : null;

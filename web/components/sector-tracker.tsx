@@ -917,7 +917,7 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
         name: row.name ?? row.ticker,
         metricLabel: "Weight",
         metricValue: row.weight != null ? `${row.weight.toFixed(2)}%` : "-",
-        chartUnavailableReason: row.chartEligible === false ? `${row.assetType === "crypto" ? "Crypto asset" : row.assetType === "derivative" ? "Futures position" : row.assetType === "money_market" ? "Money-market holding" : row.assetType === "cash" ? "Cash holding" : "Physical holding"}; an equity quote or chart does not apply.` : null,
+        chartUnavailableReason: row.chartEligible === false ? `${row.assetType === "crypto" ? "Crypto asset" : row.assetType === "derivative" ? "Futures position" : row.assetType === "money_market" ? "Money-market holding" : row.assetType === "cash" ? "Cash holding" : row.assetType === "corporate_action" ? "Corporate-action position" : "Physical holding"}; an equity quote or chart does not apply.` : null,
         badges: (
           <>
             <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${typeof row.change1d === "number" ? deltaPillCls(row.change1d) : "text-slate-400"}`}>

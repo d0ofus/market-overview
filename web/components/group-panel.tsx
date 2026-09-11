@@ -581,7 +581,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
                       </div>
                       <p className="mb-1 text-[10px] text-slate-400">Price session {row.priceSessionDate ?? "unavailable"} ? {row.priceSource ?? "source unavailable"}; holdings effective {row.asOfDate ?? "unknown"}.</p>
                       <p className="mb-2 line-clamp-2 text-xs text-slate-400">{row.name ?? row.ticker}</p>
-                      {row.chartEligible === false ? <p className="py-6 text-xs text-slate-400">{row.assetType === "crypto" ? "Crypto asset" : row.assetType === "derivative" ? "Futures position" : row.assetType === "money_market" ? "Money-market holding" : row.assetType === "cash" ? "Cash holding" : "Physical holding"}; an equity quote or chart does not apply.</p> : <><TradingViewWidget
+                      {row.chartEligible === false ? <p className="py-6 text-xs text-slate-400">{row.assetType === "crypto" ? "Crypto asset" : row.assetType === "derivative" ? "Futures position" : row.assetType === "money_market" ? "Money-market holding" : row.assetType === "cash" ? "Cash holding" : row.assetType === "corporate_action" ? "Corporate-action position" : "Physical holding"}; an equity quote or chart does not apply.</p> : <><TradingViewWidget
                         ticker={row.ticker}
                         size="small"
                         chartOnly
