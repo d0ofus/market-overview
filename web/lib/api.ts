@@ -195,6 +195,11 @@ export type OfficialRateFacts = {
 };
 
 export type FedWatchResponse = {
+  probabilitySource?: {
+    status: "idle" | "refreshing" | "cooldown" | "ready" | "unavailable";
+    lastAttemptAt: string | null; lastSuccessAt: string | null; nextAttemptAt: string | null;
+    failureCount: number; error: string | null; asOf: string | null; expiredMeetings: number;
+  };
   officialRates?: OfficialRateFacts | null;
   officialRatesWarning?: string | null;
   fomcCommentary?: FomcCommentaryItem[];
@@ -288,6 +293,8 @@ export type WeeklyMarketReviewResponse = {
   status: "empty" | "ready" | "failed";
   warning: string | null;
   report: WeeklyMarketReviewReport | null;
+  expectedWeek?: { weekStart: string; weekEnd: string };
+  latestAttempt?: (NonNullable<MarketCommentaryResponse["latestAttempt"]> & { weekStart: string; weekEnd: string }) | null;
 };
 
 export type WeeklyMarketReviewGenerateResponse = WeeklyMarketReviewResponse & {

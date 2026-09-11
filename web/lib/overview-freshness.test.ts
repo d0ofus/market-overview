@@ -7,7 +7,7 @@ import {
   type OverviewFreshnessSection,
   type OverviewFreshnessContext,
 } from "./overview-freshness";
-import type { MarketCommentaryReport, MarketCommentaryDataQuality } from "./api";
+import type { MarketCommentaryReport, MarketCommentaryDataQuality, WeeklyMarketReviewReport } from "./api";
 
 function sections(rows: OverviewFreshnessSection["groups"][number]["rows"]): OverviewFreshnessSection[] {
   return [
@@ -355,4 +355,25 @@ test("commentary freshness labels clean ready reports as fresh", () => {
   assert.equal(summary.tone, "ok");
   assert.equal(summary.label, "Source data fresh");
   assert.equal(summary.message, null);
+});
+
+test("an older successful weekly report remains dated when the current week is unavailable", () => {
+  const report: WeeklyMarketReviewReport = {
+    id: "last-good", weekStart: "2026-08-31", weekEnd: "2026-09-04", generatedAt: "2026-09-05T04:30:00Z",
+    asOf: "2026-09-04", provider: "factual", model: "verified", generationProvider: "gemini_fallback",
+    generationMode: "scheduled_fallback", status: "ready", title: "Last successful weekly report", marketTone: null,
+    reviewMarkdown: "Dated facts", sections: {}, keyTickers: [], sourceAudit: [], dataQuality: [], sourceSnapshot: {}, error: null,
+  };
+  const summary = deriveCommentaryFreshnessSummary({
+    mode: "weekly", status: "empty", report, expectedWeekEnd: "2026-09-11", dataQuality: [],
+  });
+  assert.equal(summary.tone, "warning");
+  assert.equal(summary.label, "Old report");
+  assert.match(summary.message ?? "", /2026-09-04.*2026-09-11/);
+  const failed = deriveCommentaryFreshnessSummary({
+    mode: "weekly", status: "failed", report, expectedWeekEnd: "2026-09-11", dataQuality: [],
+    warning: "Current week failed; showing separately dated last success.",
+  });
+  assert.equal(failed.label, "Failed");
+  assert.match(failed.message ?? "", /Current week failed/);
 });

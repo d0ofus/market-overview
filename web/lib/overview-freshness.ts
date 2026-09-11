@@ -92,6 +92,7 @@ export type CommentaryFreshnessInput = {
   status: MarketCommentaryResponse["status"] | WeeklyMarketReviewResponse["status"];
   warning?: string | null;
   report?: MarketCommentaryReport | WeeklyMarketReviewReport | null;
+  expectedWeekEnd?: string | null;
   dataQuality: MarketCommentaryDataQuality[];
   overview?: OverviewFreshnessContext | null;
 };
@@ -376,6 +377,11 @@ export function deriveCommentaryFreshnessSummary(input: CommentaryFreshnessInput
     tone = "warning";
     label = "Old report";
     issues.push(`Commentary is for ${reportDate}; Overview expects ${expectedDate}.`);
+  }
+  if (input.mode === "weekly" && reportDate && input.expectedWeekEnd && reportDate < input.expectedWeekEnd) {
+    tone = "warning";
+    label = "Old report";
+    issues.push(`The displayed successful report covers the week ending ${reportDate}; the latest completed week ends ${input.expectedWeekEnd}.`);
   }
 
   if (input.overview?.freshnessStatus === "stale") {

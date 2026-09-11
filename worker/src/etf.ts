@@ -1,11 +1,13 @@
 import type { Env } from "./types";
 import * as XLSX from "xlsx";
 import { ETF_CATALOG_BY_TICKER } from "./etf-catalog";
+import { etfHoldingsIssue, etfHoldingsDateIssue, etfHoldingAssetType, getEtfLifecycle, parseEtfHoldingsDate, type EtfHoldingAssetType } from "./etf-holdings-quality";
 
 export type EtfConstituent = {
   ticker: string;
   name: string | null;
   weight: number | null;
+  assetType?: EtfHoldingAssetType;
 };
 
 export type EtfSourceTier = "official" | "partial" | "synthetic";
@@ -44,6 +46,7 @@ type ExistingEtfCacheState = {
   lastSyncedAt: string | null;
   lastFullSyncedAt: string | null;
   lastPartialSyncedAt: string | null;
+  asOfDate: string | null;
 };
 
 type EtfSourceResolution = {
@@ -85,6 +88,7 @@ const SSGA_KNOWN_FUND_DATA_TICKERS = new Set([
 ]);
 
 const SPECIAL_OFFICIAL_URL_BY_TICKER: Record<string, string> = {
+  GLD: "https://www.spdrgoldshares.com/usa/gld/",
   ARKF: "https://www.ark-funds.com/funds/arkf",
   ARKG: "https://www.ark-funds.com/funds/arkg",
   ARKK: "https://www.ark-funds.com/funds/arkk",
@@ -256,13 +260,13 @@ function normalizeGlobalXTickerCell(value: string | null | undefined): string | 
 
 function parseWeightCell(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) {
-    return value > 0 && value <= 1 ? value * 100 : value;
+    return value;
   }
-  if (typeof value !== "string") return null;
+  if (typeof value !== "string" || !value.trim()) return null;
   const normalized = value.replace(/[%,$\s]/g, "");
   const n = Number(normalized);
   if (!Number.isFinite(n)) return null;
-  return n > 0 && n <= 1 ? n * 100 : n;
+  return n;
 }
 
 function findSsgaHeaderIndexes(rows: unknown[][]): { headerRowIndex: number; tickerIdx: number; weightIdx: number; nameIdx: number } | null {
@@ -344,12 +348,17 @@ function parseSsgaDelimitedRows(raw: string): EtfConstituent[] {
   return parseSsgaRows(rows as unknown[][]);
 }
 
-function parseSsgaWorkbookRows(buffer: ArrayBuffer): EtfConstituent[] {
+function parseSsgaWorkbookRows(buffer: ArrayBuffer, etfTicker?: string, requireFundIdentity = false): EtfConstituent[] {
   const workbook = XLSX.read(buffer, { type: "array" });
   for (const sheetName of workbook.SheetNames) {
     const sheet = workbook.Sheets[sheetName];
     if (!sheet) continue;
-    const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: null, blankrows: false });
+    // Respect Excel percentage formatting rather than multiplying all small
+    // numbers: a CSV 0.50% and a formatted Excel 0.005 both mean 0.50%.
+    const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: null, blankrows: false, raw: false });
+    const identified = parseFundIdentifiedRows(rows, etfTicker);
+    if (identified !== null) return identified;
+    if (requireFundIdentity) continue;
     const parsed = parseSsgaRows(rows as unknown[][]);
     if (parsed.length > 0) return parsed;
   }
@@ -548,6 +557,22 @@ export function parseAdvisorSharesDelimitedRows(raw: string, accountSymbol: stri
   return [...dedup.values()].sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0));
 }
 
+function parseFundIdentifiedRows(rows: unknown[][], etfTicker?: string): EtfConstituent[] | null {
+  for (let index = 0; index < rows.length; index++) {
+    const header = rows[index].map(cell => String(cell ?? "").trim().toLowerCase());
+    const fundIndex = header.findIndex(cell => ["account symbol", "fund", "fund ticker", "fund symbol"].includes(cell));
+    const tickerIndex = header.findIndex(cell => ["stock ticker", "ticker", "symbol"].includes(cell));
+    if (fundIndex < 0 || tickerIndex < 0) continue;
+    if (!etfTicker) return [];
+    const matching = rows.slice(index + 1).filter(row => String(row[fundIndex] ?? "").trim().toUpperCase() === etfTicker.toUpperCase());
+    if (!matching.length) return [];
+    const quote = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`;
+    const csv = [rows[index], ...matching].map(row => row.map(quote).join(",")).join("\n");
+    return header[fundIndex] === "account symbol" ? parseAdvisorSharesDelimitedRows(csv, etfTicker) : parseFlexibleDelimitedRows(csv);
+  }
+  return null;
+}
+
 export function parseCoinSharesHoldingsHtml(html: string): EtfConstituent[] {
   const text = html.replace(/<[^>]+>/g, "\n").replace(/&nbsp;/g, " ");
   const start = text.search(/Fund Holdings/i);
@@ -695,9 +720,15 @@ export function parseHoldingsFileByType(
     lowerType.includes("octet-stream") ||
     lowerType.includes("zip");
   if (looksWorkbook && binaryBody) {
-    return parseSsgaWorkbookRows(binaryBody);
+    return parseSsgaWorkbookRows(binaryBody, options.etfTicker ?? undefined, /^https:\/\/(?:www\.)?advisorshares\.com\//i.test(url));
   }
   const text = textBody ?? "";
+  const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/).filter(line => line.trim());
+  const delimiter = lines.some(line => line.includes("\t")) ? "\t" : ",";
+  const identified = parseFundIdentifiedRows(lines.map(line => splitDelimitedRow(line, delimiter)), options.etfTicker ?? undefined);
+  if (identified !== null) return identified;
+  if (/^https:\/\/(?:www\.)?advisorshares\.com\//i.test(url)) return [];
+  if (/^\s*(?:<!doctype html|<html)/i.test(text)) return [];
   // Consolidated issuer exports must never fall through to an unfiltered generic parser.
   if (/account symbol/i.test(text) && /stock ticker/i.test(text)) {
     return options.etfTicker ? parseAdvisorSharesDelimitedRows(text, options.etfTicker) : [];
@@ -715,6 +746,61 @@ export function parseHoldingsFileByType(
   const parsedFlexible = parseFlexibleDelimitedRows(text);
   if (parsedFlexible.length > 0) return parsedFlexible;
   return [];
+}
+
+export function holdingsFileAsOfDate(text: string, etfTicker?: string): string | null {
+  const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/).filter(line => line.trim());
+  const rows = lines.map(line => splitDelimitedRow(line, line.includes("\t") ? "\t" : ","));
+  const labeled = rows.slice(0, 20).filter(row => /\b(?:as of|as-of|asof|holdings date)\b/i.test(row[0] ?? ""))
+    .flatMap(row => row.map(parseEtfHoldingsDate)).filter((date): date is string => date !== null);
+  if (new Set(labeled).size === 1) return labeled[0];
+  for (let index = 0; index < Math.min(rows.length, 20); index++) {
+    const header = rows[index].map(cell => cell.toLowerCase().trim());
+    const dateIndex = header.findIndex(cell => ["date", "as of date", "trade date", "holdings date"].includes(cell));
+    const fundIndex = header.findIndex(cell => ["account symbol", "fund", "fund ticker"].includes(cell));
+    if (dateIndex < 0) continue;
+    const dates = rows.slice(index + 1).filter(row => fundIndex < 0 || (etfTicker && row[fundIndex]?.toUpperCase() === etfTicker))
+      .map(row => parseEtfHoldingsDate(row[dateIndex])).filter((date): date is string => date !== null);
+    if (dates.length && new Set(dates).size === 1) return dates[0];
+  }
+  return null;
+}
+
+const SPDR_GOLD_ARCHIVE = "https://api.spdrgoldshares.com/api/v1/historical-archive?exchange=NYSE&lang=en&product=gld";
+export function parseSpdrGoldArchive(buffer: ArrayBuffer, now = new Date()): EtfFetchResult {
+  if (buffer.byteLength > 2_000_000) throw new Error("holdings-official-file-too-large");
+  const workbook = XLSX.read(buffer, { type: "array" }), sheet = workbook.Sheets["US GLD Historical Archive"];
+  if (!sheet) throw new Error("holdings-gld-security-identity-invalid");
+  const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: null });
+  const header = rows[0]?.map(cell => String(cell ?? "").trim()) ?? [];
+  const dateIndex = header.indexOf("Date"), ouncesIndex = header.indexOf("Total Ounces of Gold in the Trust"), navIndex = header.indexOf("Total Net Asset Value in the Trust");
+  if (dateIndex < 0 || ouncesIndex < 0 || navIndex < 0) throw new Error("holdings-gld-archive-columns-invalid");
+  const dated = rows.slice(1).map(row => ({ row, date: parseEtfHoldingsDate(String(row[dateIndex] ?? "")) }))
+    .filter((item): item is {row: unknown[]; date: string} => item.date !== null).sort((a,b) => b.date.localeCompare(a.date));
+  const latest = dated[0], today = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+  if (!latest || latest.date > today || [latest.row[ouncesIndex], latest.row[navIndex]].some(value => typeof value !== "number" || !Number.isFinite(value) || value <= 0)) {
+    throw new Error("holdings-gld-archive-observation-invalid");
+  }
+  return { holdings: [{ ticker: "PHYSICAL-GOLD", name: "Physical gold bullion", weight: null, assetType: "physical_commodity" }],
+    source: "spdrgoldshares:physical-gold-archive", sourceUrl: SPDR_GOLD_ARCHIVE, sourceTier: "official", coverage: "single_asset",
+    asOfDate: latest.date, providerRecordsCount: 1, expectedMinRecords: 1 };
+}
+
+async function fetchSpdrGoldConstituents(): Promise<EtfFetchResult> {
+  const response = await fetch(SPDR_GOLD_ARCHIVE, { headers: { "User-Agent": "market-command-centre/1.0" }, signal: AbortSignal.timeout(20_000) });
+  if (!response.ok) throw new Error(`GLD official archive fetch failed (${response.status})`);
+  const buffer = await response.arrayBuffer();
+  return parseSpdrGoldArchive(buffer);
+}
+
+export function parseIsharesPhysicalHoldings(text: string, etfTicker: string): EtfConstituent[] {
+  if (etfTicker !== "SLV" || /^\s*(?:<!doctype html|<html)/i.test(text)) return [];
+  const rows = text.split(/\r?\n/).map(line => splitDelimitedRow(line, ","));
+  const headerIndex = rows.findIndex(row => row.includes("Name") && row.includes("Asset Class") && row.includes("Weight (%)"));
+  if (headerIndex < 0) return [];
+  const header = rows[headerIndex], nameIndex = header.indexOf("Name"), assetIndex = header.indexOf("Asset Class"), weightIndex = header.indexOf("Weight (%)");
+  return rows.slice(headerIndex + 1).filter(row => /^silver(?: bullion)?$/i.test(row[nameIndex] ?? "") && /^commodity$/i.test(row[assetIndex] ?? ""))
+    .map(row => ({ticker: "PHYSICAL-SILVER", name: "Physical silver bullion", weight: parseWeightCell(row[weightIndex]), assetType: "physical_commodity" as const}));
 }
 
 function extractGlobalXCsvLinks(html: string): string[] {
@@ -810,7 +896,7 @@ async function fetchIsharesConstituents(etfTicker: string, sourceUrl: string): P
   if (!productId) throw new Error("Could not resolve iShares product id");
   if (etfTicker === "IBIT") {
     return {
-      holdings: [{ ticker: "BTC", name: "Bitcoin", weight: 100 }],
+      holdings: [{ ticker: "BTC", name: "Bitcoin", weight: null, assetType: "crypto" }],
       source: "ishares:single-asset",
       sourceUrl,
       sourceTier: "synthetic",
@@ -840,14 +926,17 @@ async function fetchIsharesConstituents(etfTicker: string, sourceUrl: string): P
         errors.push(`${new URL(csvUrl).pathname} (${res.status})`);
         continue;
       }
-      const parsed = parseHoldingsFileByType(csvUrl, res.headers.get("content-type") ?? "", await res.text(), null, { etfTicker });
+      const text = await res.text();
+      const parsed = etfTicker === "SLV" ? parseIsharesPhysicalHoldings(text, etfTicker)
+        : parseHoldingsFileByType(csvUrl, res.headers.get("content-type") ?? "", text, null, { etfTicker });
       if (parsed.length > 0) {
         return {
           holdings: parsed,
           source: "ishares:holdings-csv",
           sourceUrl: csvUrl,
           sourceTier: "official",
-          coverage: "full",
+          coverage: etfTicker === "SLV" ? "single_asset" : "full",
+          asOfDate: holdingsFileAsOfDate(text, etfTicker),
           providerRecordsCount: parsed.length,
         };
       }
@@ -931,6 +1020,7 @@ async function fetchCoinSharesConstituents(etfTicker: string, sourceUrl: string)
 
 async function fetchOfficialConstituentsFromUrl(etfTicker: string, sourceUrl: string): Promise<EtfFetchResult> {
   const domain = new URL(sourceUrl).hostname.toLowerCase();
+  if (etfTicker === "GLD") return fetchSpdrGoldConstituents();
   if (etfTicker === "IBIT") {
     return await fetchIsharesConstituents(etfTicker, sourceUrl);
   }
@@ -972,10 +1062,16 @@ async function fetchOfficialConstituentsFromUrl(etfTicker: string, sourceUrl: st
   if (!pageRes.ok) {
     throw new Error(`Official source page fetch failed (${pageRes.status})`);
   }
+  // A liquidated/renamed product may redirect to an issuer directory. Never
+  // treat that directory's downloads as the requested fund's full holdings.
+  if (pageRes.url && /\/etfs\/[a-z0-9-]+\/?$/i.test(new URL(sourceUrl).pathname)
+    && !new URL(pageRes.url).pathname.toLowerCase().split("/").includes(etfTicker.toLowerCase())) {
+    throw new Error("holdings-official-page-identity-changed");
+  }
   const pageHtml = await pageRes.text();
   for (const raw of extractDownloadLinksFromHtml(pageHtml)) {
     const normalized = normalizeCsvUrl(raw, sourceUrl);
-    if (normalized) candidates.add(normalized);
+    if (normalized && new URL(normalized).hostname.replace(/^www\./, "") === domain.replace(/^www\./, "")) candidates.add(normalized);
   }
 
   const errors: string[] = [];
@@ -995,9 +1091,8 @@ async function fetchOfficialConstituentsFromUrl(etfTicker: string, sourceUrl: st
       const contentType = res.headers.get("content-type") ?? "";
       const lowerUrl = url.toLowerCase();
       const shouldReadBinary = lowerUrl.endsWith(".xlsx") || lowerUrl.endsWith(".xls") || /sheet|excel|octet-stream|zip/i.test(contentType);
-      const parsed = shouldReadBinary
-        ? parseHoldingsFileByType(url, contentType, null, await res.arrayBuffer(), { etfTicker })
-        : parseHoldingsFileByType(url, contentType, await res.text(), null, { etfTicker });
+      const binary = shouldReadBinary ? await res.arrayBuffer() : null, text = shouldReadBinary ? null : await res.text();
+      const parsed = parseHoldingsFileByType(url, contentType, text, binary, { etfTicker });
       if (parsed.length > 0) {
         return {
           holdings: parsed,
@@ -1006,6 +1101,7 @@ async function fetchOfficialConstituentsFromUrl(etfTicker: string, sourceUrl: st
           sourceTier: "official",
           coverage: "full",
           providerRecordsCount: parsed.length,
+          asOfDate: text === null ? null : holdingsFileAsOfDate(text, etfTicker),
         };
       }
       errors.push(`${new URL(url).hostname}${new URL(url).pathname} (parsed 0 rows)`);
@@ -1441,10 +1537,10 @@ async function fetchEtfDbConstituents(etfTicker: string): Promise<EtfFetchResult
 
 async function loadExistingEtfCacheState(env: Env, etfTicker: string): Promise<ExistingEtfCacheState> {
   const actual = await env.DB.prepare(
-    "SELECT COUNT(*) as count FROM etf_constituents WHERE etf_ticker = ?",
+    "SELECT COUNT(*) as count, MAX(as_of_date) as asOfDate FROM etf_constituents WHERE etf_ticker = ?",
   )
     .bind(etfTicker)
-    .first<{ count: number | null }>()
+    .first<{ count: number | null; asOfDate: string | null }>()
     .catch(() => null);
   try {
     const row = await env.DB.prepare(
@@ -1471,6 +1567,7 @@ async function loadExistingEtfCacheState(env: Env, etfTicker: string): Promise<E
       lastSyncedAt: row?.lastSyncedAt ?? null,
       lastFullSyncedAt: row?.lastFullSyncedAt ?? null,
       lastPartialSyncedAt: row?.lastPartialSyncedAt ?? null,
+      asOfDate: actual?.asOfDate ?? null,
     };
   } catch {
     const row = await env.DB.prepare(
@@ -1489,6 +1586,7 @@ async function loadExistingEtfCacheState(env: Env, etfTicker: string): Promise<E
       lastSyncedAt: row?.lastSyncedAt ?? null,
       lastFullSyncedAt: null,
       lastPartialSyncedAt: null,
+      asOfDate: actual?.asOfDate ?? null,
     };
   }
 }
@@ -1579,7 +1677,7 @@ async function persistSyncErrorAndThrow(
     syncedAt: now,
     status: "error",
     error: message,
-    source,
+    source: existing.actualCount > 0 ? existing.source ?? source : source,
     recordsCount: Math.max(existing.actualCount, existing.recordsCount),
     sourceUrl: existing.sourceUrl,
     sourceTier: existing.sourceTier,
@@ -1606,6 +1704,14 @@ function toSyncResult(fetchResult: EtfFetchResult, count = fetchResult.holdings.
   };
 }
 
+function checkedEtfResult(etfTicker: string, result: EtfFetchResult): EtfFetchResult {
+  if (!result.holdings.length) throw new Error("holdings-source-empty");
+  const issue = etfHoldingsIssue(etfTicker, result.holdings.map(row => ({ ...row, source: result.source })))
+    ?? etfHoldingsDateIssue([result.asOfDate]);
+  if (issue) throw new Error(issue);
+  return result;
+}
+
 export async function syncEtfConstituents(env: Env, etfTickerInput: string): Promise<EtfSyncResult> {
   const etfTicker = normalizeTicker(etfTickerInput);
   if (!etfTicker) throw new Error("Invalid ETF ticker");
@@ -1615,11 +1721,17 @@ export async function syncEtfConstituents(env: Env, etfTickerInput: string): Pro
   const invesco = await getInvescoPreference(env, etfTicker);
   const officialUrl = await officialUrlForTicker(env, etfTicker);
   const existing = await loadExistingEtfCacheState(env, etfTicker);
+  const lifecycle = getEtfLifecycle(etfTicker);
+  if (lifecycle && new Date().toISOString().slice(0, 10) >= lifecycle.liquidationDate) {
+    await persistSyncErrorAndThrow(env, etfTicker, "official:fund-liquidated", [
+      `${etfTicker} last traded ${lifecycle.lastTradingDate}; liquidated ${lifecycle.liquidationDate}. Historical holdings are retained; current holdings are unavailable.`,
+    ]);
+  }
 
   if (officialUrl) {
     source = `official:${new URL(officialUrl).hostname.replace(/^www\./i, "")}`;
     try {
-      result = await fetchOfficialConstituentsFromUrl(etfTicker, officialUrl);
+      result = checkedEtfResult(etfTicker, await fetchOfficialConstituentsFromUrl(etfTicker, officialUrl));
       if (result.holdings.length === 0) throw new Error("Official source returned no holdings");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Official source sync failed";
@@ -1629,10 +1741,15 @@ export async function syncEtfConstituents(env: Env, etfTickerInput: string): Pro
       }
     }
   }
+  // These trusts own physical assets. A stock-list fallback is not the same
+  // instrument and cannot replace a failed official bullion observation.
+  if (!result && (etfTicker === "GLD" || etfTicker === "SLV")) {
+    await persistSyncErrorAndThrow(env, etfTicker, source, errors);
+  }
   if (!result && shouldPreferSsgaFundData(etfTicker)) {
     source = "ssga:fund-data";
     try {
-      result = await fetchSsgaFundDataConstituents(etfTicker);
+      result = checkedEtfResult(etfTicker, await fetchSsgaFundDataConstituents(etfTicker));
       if (result.holdings.length === 0) throw new Error("SSGA returned no holdings");
     } catch (error) {
       const message = error instanceof Error ? error.message : "SSGA sync failed";
@@ -1646,7 +1763,7 @@ export async function syncEtfConstituents(env: Env, etfTickerInput: string): Pro
   if (!result && invesco.prefer) {
     source = "invesco:holdings-api";
     try {
-      result = await fetchInvescoApiConstituents(etfTicker, officialUrl);
+      result = checkedEtfResult(etfTicker, await fetchInvescoApiConstituents(etfTicker, officialUrl));
       if (result.holdings.length === 0) throw new Error("Invesco holdings API returned no holdings");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Invesco holdings API sync failed";
@@ -1658,7 +1775,7 @@ export async function syncEtfConstituents(env: Env, etfTickerInput: string): Pro
     if (!result) {
       source = "invesco:portfolio-csv";
       try {
-        result = await fetchInvescoConstituents(etfTicker, officialUrl);
+        result = checkedEtfResult(etfTicker, await fetchInvescoConstituents(etfTicker, officialUrl));
         if (result.holdings.length === 0) throw new Error("Invesco returned no holdings");
       } catch (error) {
         const message = error instanceof Error ? error.message : "Invesco CSV sync failed";
@@ -1677,7 +1794,7 @@ export async function syncEtfConstituents(env: Env, etfTickerInput: string): Pro
   if (!result) {
     source = "yahoo:topHoldings";
     try {
-      result = await fetchYahooConstituents(etfTicker);
+      result = checkedEtfResult(etfTicker, await fetchYahooConstituents(etfTicker));
       if (result.holdings.length === 0) throw new Error("Yahoo returned no holdings");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Yahoo sync failed";
@@ -1691,7 +1808,7 @@ export async function syncEtfConstituents(env: Env, etfTickerInput: string): Pro
   if (!result) {
     source = "stockanalysis:holdings-page";
     try {
-      result = await fetchStockAnalysisConstituents(etfTicker);
+      result = checkedEtfResult(etfTicker, await fetchStockAnalysisConstituents(etfTicker));
       if (result.holdings.length === 0) throw new Error("StockAnalysis returned no holdings");
     } catch (error) {
       const message = error instanceof Error ? error.message : "StockAnalysis sync failed";
@@ -1705,7 +1822,7 @@ export async function syncEtfConstituents(env: Env, etfTickerInput: string): Pro
   if (!result) {
     source = "etfdb:holdings-page";
     try {
-      result = await fetchEtfDbConstituents(etfTicker);
+      result = checkedEtfResult(etfTicker, await fetchEtfDbConstituents(etfTicker));
       if (result.holdings.length === 0) throw new Error("ETFdb returned no holdings");
     } catch (error) {
       errors.push(error instanceof Error ? error.message : "ETFdb sync failed");
@@ -1731,7 +1848,7 @@ export async function syncEtfConstituents(env: Env, etfTickerInput: string): Pro
       etfTicker,
       syncedAt: now,
       status: "partial",
-      error: `Latest provider returned partial holdings (${finalResult.holdings.length}); retaining the last full holdings from ${existing.lastFullSyncedAt ?? existing.lastSyncedAt ?? "an unknown date"}.`,
+      error: `Latest provider returned partial holdings (${finalResult.holdings.length}); retaining the last full holdings from ${existing.lastFullSyncedAt ?? existing.asOfDate ?? "an unverified date"}.`,
       source: existing.source ?? finalResult.source,
       recordsCount: retainedCount,
       sourceUrl: existing.sourceUrl ?? finalResult.sourceUrl,
@@ -1739,7 +1856,7 @@ export async function syncEtfConstituents(env: Env, etfTickerInput: string): Pro
       coverage: existing.coverage ?? "full",
       providerRecordsCount: finalResult.providerRecordsCount ?? finalResult.holdings.length,
       expectedMinRecords: finalResult.expectedMinRecords ?? null,
-      lastFullSyncedAt: existing.lastFullSyncedAt ?? existing.lastSyncedAt,
+      lastFullSyncedAt: existing.lastFullSyncedAt,
       lastPartialSyncedAt: now,
     });
     return {
@@ -1748,30 +1865,38 @@ export async function syncEtfConstituents(env: Env, etfTickerInput: string): Pro
       sourceUrl: existing.sourceUrl ?? finalResult.sourceUrl,
       sourceTier: existing.sourceTier ?? "official",
       coverage: existing.coverage ?? "full",
+      asOfDate: existing.asOfDate,
     };
   }
 
   const holdings = finalResult.holdings;
+  if (!Number.isSafeInteger(existing.actualCount) || existing.actualCount < 0 || existing.actualCount > 10_000) {
+    await persistSyncErrorAndThrow(env, etfTicker, finalResult.source, ["holdings-existing-count-limit"]);
+  }
+  const payload = JSON.stringify(holdings.map(h => ({ id: crypto.randomUUID(), ticker: h.ticker,
+    name: h.name ?? null, weight: h.weight, assetType: etfHoldingAssetType(etfTicker, { ...h, source: finalResult.source }) })));
+  // Both inserts share this bounded input. Keep the complete replacement in one
+  // transaction, including symbol seeding, regardless of constituent count.
+  if (new TextEncoder().encode(JSON.stringify(payload)).byteLength * 2
+    + new TextEncoder().encode(JSON.stringify([etfTicker, asOfDate, finalResult.source])).byteLength * 2 > 2_000_000 - 4096) {
+    await persistSyncErrorAndThrow(env, etfTicker, finalResult.source, ["holdings-persistence-payload-limit"]);
+  }
   const statements = [
-    env.DB.prepare("DELETE FROM etf_constituents WHERE etf_ticker = ?").bind(etfTicker),
-    ...holdings.map((h) =>
-      env.DB.prepare(
-        "INSERT OR REPLACE INTO etf_constituents (id, etf_ticker, constituent_ticker, constituent_name, weight, as_of_date, source, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
-      ).bind(
-        crypto.randomUUID(),
-        etfTicker,
-        h.ticker,
-        h.name ?? null,
-        h.weight,
-        asOfDate,
-        finalResult.source,
-      ),
-    ),
-    ...holdings.map((h) =>
-      env.DB.prepare(
-        "INSERT OR IGNORE INTO symbols (ticker, name, exchange, asset_class) VALUES (?, ?, ?, ?)",
-      ).bind(h.ticker, h.name ?? h.ticker, null, h.ticker === "BTC" ? "crypto" : "equity"),
-    ),
+    // A concurrent larger replacement must abort the entire transaction before
+    // exceeding its admitted delete budget. Malformed JSON deliberately aborts.
+    env.DB.prepare(`DELETE FROM etf_constituents WHERE etf_ticker = ? AND
+      CASE WHEN (SELECT COUNT(*) FROM etf_constituents WHERE etf_ticker = ?) <= ?
+      THEN 1 ELSE json_extract('holdings-concurrent-size-changed', '$') END /* etf-holdings-replace-delete */`)
+      .bind(etfTicker, etfTicker, existing.actualCount),
+    env.DB.prepare(`INSERT INTO etf_constituents
+      (id, etf_ticker, constituent_ticker, constituent_name, weight, as_of_date, source, updated_at)
+      SELECT json_extract(value, '$.id'), ?, json_extract(value, '$.ticker'), json_extract(value, '$.name'),
+        json_extract(value, '$.weight'), ?, ?, CURRENT_TIMESTAMP FROM json_each(?) /* etf-holdings-replace-insert */`)
+      .bind(etfTicker, asOfDate, finalResult.source, payload),
+    env.DB.prepare(`INSERT OR IGNORE INTO symbols (ticker, name, exchange, asset_class)
+      SELECT json_extract(value, '$.ticker'), COALESCE(json_extract(value, '$.name'), json_extract(value, '$.ticker')),
+        NULL, json_extract(value, '$.assetType') FROM json_each(?)
+      WHERE json_extract(value, '$.assetType') IN ('equity', 'fund') /* etf-holdings-symbols-insert */`).bind(payload),
   ];
   await env.DB.batch(statements);
   await persistSyncStatus(env, {

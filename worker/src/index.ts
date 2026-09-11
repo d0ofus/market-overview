@@ -4,6 +4,7 @@ import { coordinateEod, dispatchEodRun, enqueueEodRun, eodEnabled, eodStatus, ex
 import { EOD_RUNTIME_COORDINATOR_PATH, isEodRuntimeHttpProbe, runEodRuntimeProbe } from "./eod-runtime-telemetry";
 import { loadMarketHistory, loadMarketHistoryCoverage } from "./market-history";
 import { getStoredHoldingStats } from "./eod-holdings-quotes";
+import { ETF_HOLDINGS_REFRESH_DAYS, loadDueEtfRefreshTickers } from "./etf-refresh-schedule";
 import { EodCatalogUnavailableError, loadEodCatalogRows } from "./eod-catalog-service";
 import { loadCatalogSectorTrending } from "./sector-trending-service";
 import { loadMarketHistoryLatestDates } from "./market-history-metadata";
@@ -116,6 +117,7 @@ import { getProvider } from "./provider";
 import { resolveTickerMeta } from "./symbol-resolver";
 import { fetchSec13fSnapshot, MANAGER_DEFS } from "./sec13f";
 import { resolveEtfSourceUrl, syncEtfConstituents } from "./etf";
+import { prepareStoredEtfHoldings, type StoredEtfHolding } from "./etf-holdings-quality";
 import { EQUAL_WEIGHT_SECTOR_ETFS } from "./etf-catalog";
 import { parseLocalTime, zonedParts } from "./refresh-timing";
 import { latestUsMarketSessionAsOfDate } from "./market-calendar";
@@ -166,7 +168,7 @@ import {
 import { isAdminRequestAuthorized, isOverviewRolloutRequestAuthorized, envFlagEnabled } from "./auth";
 export { isAdminRequestAuthorized, isOverviewRolloutRequestAuthorized, shouldAllowFedWatchForceRefresh } from "./auth";
 import { registerFedWatchRoutes } from "./routes/fedwatch";
-import { loadOrRefreshLatestFomcCommentary, refreshFomcCommentary, refreshLatestFomcCommentary, shouldRunScheduledFomcRefresh } from "./fomc-commentary-service";
+import { loadLatestFomcCommentary, refreshFomcCommentary, refreshLatestFomcCommentary, shouldRunScheduledFomcRefresh } from "./fomc-commentary-service";
 import { loadBraveUsageDaily } from "./market-report-common";
 import { cleanupProviderUsage, loadProviderUsageDaily } from "./provider-usage";
 import { loadDatabaseCapacity, sampleDatabaseCapacity } from "./database-capacity-service";
@@ -2732,7 +2734,7 @@ registerFedWatchRoutes(app);
 app.get("/api/fomc-commentary", async (c) => {
   try {
     const limit = Math.max(1, Math.min(10, Number(c.req.query("limit") ?? 4)));
-    const items = await loadOrRefreshLatestFomcCommentary(c.env, limit);
+    const items = await loadLatestFomcCommentary(c.env, limit);
     c.header("Cache-Control", "public, max-age=300");
     return c.json({ items });
   } catch (error) {
@@ -3744,55 +3746,25 @@ app.get("/api/etf/:ticker/constituents", async (c) => {
     "SELECT constituent_ticker as ticker, constituent_name as name, weight, as_of_date as asOfDate, source, updated_at as updatedAt FROM etf_constituents WHERE etf_ticker = ? ORDER BY weight DESC, ticker ASC",
   )
     .bind(ticker)
-    .all();
+    .all<StoredEtfHolding>();
   const baseRows = rows.results ?? [];
   const latestBaseUpdatedAt = baseRows
-    .map((row: any) => row.updatedAt)
+    .map((row) => row.updatedAt)
     .filter(Boolean)
     .sort()
     .at(-1) ?? null;
 
-  let status = await loadEtfSyncStatus(c.env, ticker, {
+  const status = await loadEtfSyncStatus(c.env, ticker, {
     actualRecordsCount: baseRows.length,
     latestConstituentUpdatedAt: latestBaseUpdatedAt,
   });
-  const hasKnownError = status?.status === "error";
-  const hasNoRecords = baseRows.length === 0;
-  const isRecentError = hasKnownError && !isStaleDate(status?.lastSyncedAt, 1);
-  const hasCachedRows = baseRows.length > 0;
-  const shouldSync = false;
-  let warning: string | null = forceSync
-    ? "Public constituent reads are stored-only; queue an authenticated ETF refresh instead."
-    : null;
-  if (shouldSync) {
-    try {
-      await syncEtfConstituents(c.env, ticker);
-      status = await loadEtfSyncStatus(c.env, ticker);
-    } catch (error) {
-      if (!hasCachedRows) {
-        warning = error instanceof Error ? error.message : "Constituent pull failed";
-      }
-      status = await loadEtfSyncStatus(c.env, ticker, {
-        actualRecordsCount: baseRows.length,
-        latestConstituentUpdatedAt: latestBaseUpdatedAt,
-      }) ?? status;
-    }
-  }
-
-  const finalRows = shouldSync
-    ? (await c.env.DB.prepare(
-      "SELECT constituent_ticker as ticker, constituent_name as name, weight, as_of_date as asOfDate, source, updated_at as updatedAt FROM etf_constituents WHERE etf_ticker = ? ORDER BY weight DESC, ticker ASC",
-    )
-      .bind(ticker)
-      .all()).results ?? []
-    : baseRows;
-  const finalHasNoRecords = finalRows.length === 0;
-
-  // Limit per-request quote/bar fanout to avoid worker subrequest caps on large constituent sets.
-  const pricedTickers = finalRows.map((r: any) => String(r.ticker));
+  const prepared = prepareStoredEtfHoldings(ticker, baseRows, status);
+  // Physical bullion is not an equity ticker. Quarantined lists never produce
+  // quote fanout, and every eligible returned security is still priced.
+  const pricedTickers = prepared.rows.filter(row => row.chartEligible).map(row => row.ticker);
   const statsMap = await getStoredHoldingStats(c.env, pricedTickers);
-  const rowsWithStats = finalRows.map((row: any) => {
-    const stats = statsMap.get(String(row.ticker).toUpperCase());
+  const rowsWithStats = prepared.rows.map((row) => {
+    const stats = row.chartEligible ? statsMap.get(row.ticker.toUpperCase()) : undefined;
     return {
       ...row,
       change1d: stats?.change1d ?? null,
@@ -3800,22 +3772,18 @@ app.get("/api/etf/:ticker/constituents", async (c) => {
       priceSessionDate: stats?.barDate ?? null,
       barDate: stats?.barDate ?? null,
       priceSource: stats?.source ?? null,
+      priceStatus: row.chartEligible ? (stats?.lastPrice == null ? stats?.unavailableReason ?? "unavailable" : "dated")
+        : row.assetType === "crypto" ? "crypto-asset-no-equity-quote" : "physical-asset-no-equity-quote",
     };
   });
-  if (!warning && status?.status === "error" && status.error) {
-    warning = status.error;
-  }
-  if (!warning && !forceSync && finalHasNoRecords) {
-    warning = "No cached constituents yet for this ETF. Constituents are loaded from the database and updated by scheduled/admin sync.";
-  }
-  if (!warning && isRecentError && finalHasNoRecords) {
-    warning = "Constituent sync is temporarily throttled after a recent provider-limit error. Try again later or run monthly sync.";
-  }
   return c.json({
     etf,
     rows: rowsWithStats,
-    syncStatus: status ?? null,
-    warning,
+    syncStatus: prepared.syncStatus,
+    holdings: prepared.holdings,
+    warning: [prepared.warning, [...statsMap.values()].some(value => value.unavailableReason === "eod-catalog-unavailable")
+      ? "The expected EOD price catalog is unavailable; dated holdings remain visible with unavailable prices." : null,
+      forceSync ? "Public constituent reads are stored-only; queue an authenticated ETF refresh instead." : null].filter(Boolean).join(" ") || null,
   });
 });
 
@@ -7768,30 +7736,15 @@ app.get("/api/admin/audit", async (c) => {
 
 async function syncMonthlyEtfSlice(env: Env, settings?: CronJobValues): Promise<void> {
   if (settings && !isCentralCronEnabled(settings)) return;
-  // Process only a small stale slice per scheduled run to stay under worker subrequest budgets.
-  const maxPerRun = cronNumber(settings ?? {}, "batchLimit", 5);
-  const staleDays = cronNumber(settings ?? {}, "staleDays", 14);
-  const staleRows = await (async () => {
+  const selected = await loadDueEtfRefreshTickers(env.DB, {
+    staleDays: cronNumber(settings ?? {}, "staleDays", ETF_HOLDINGS_REFRESH_DAYS),
+    batchLimit: cronNumber(settings ?? {}, "batchLimit", 5),
+  });
+  for (const ticker of selected) {
     try {
-      return await env.DB.prepare(
-        "SELECT w.ticker as ticker, s.last_synced_at as lastSyncedAt, s.status as status, s.coverage as coverage, s.source_tier as sourceTier, COALESCE(s.records_count, 0) as recordsCount, COALESCE(cs.actualRecordsCount, 0) as actualRecordsCount FROM (SELECT DISTINCT ticker FROM etf_watchlists) w LEFT JOIN etf_constituent_sync_status s ON s.etf_ticker = w.ticker LEFT JOIN (SELECT etf_ticker as etfTicker, COUNT(*) as actualRecordsCount FROM etf_constituents GROUP BY etf_ticker) cs ON cs.etfTicker = w.ticker WHERE s.last_synced_at IS NULL OR s.status = 'error' OR s.status = 'partial' OR s.coverage = 'partial' OR s.source_tier = 'partial' OR COALESCE(cs.actualRecordsCount, s.records_count, 0) = 0 OR (julianday('now') - julianday(s.last_synced_at)) >= ? ORDER BY CASE WHEN s.last_synced_at IS NULL THEN 0 WHEN s.status = 'error' THEN 1 WHEN s.status = 'partial' OR s.coverage = 'partial' OR s.source_tier = 'partial' THEN 2 WHEN COALESCE(cs.actualRecordsCount, s.records_count, 0) = 0 THEN 3 ELSE 4 END, datetime(COALESCE(s.last_synced_at, '1970-01-01 00:00:00')) ASC, w.ticker ASC LIMIT ?",
-      )
-        .bind(staleDays, maxPerRun)
-        .all<{ ticker: string; lastSyncedAt: string | null; status: string | null; coverage?: string | null; sourceTier?: string | null; recordsCount: number | null; actualRecordsCount: number | null }>();
-    } catch {
-      return await env.DB.prepare(
-        "SELECT w.ticker as ticker, s.last_synced_at as lastSyncedAt, s.status as status, COALESCE(s.records_count, 0) as recordsCount, COALESCE(cs.actualRecordsCount, 0) as actualRecordsCount FROM (SELECT DISTINCT ticker FROM etf_watchlists) w LEFT JOIN etf_constituent_sync_status s ON s.etf_ticker = w.ticker LEFT JOIN (SELECT etf_ticker as etfTicker, COUNT(*) as actualRecordsCount FROM etf_constituents GROUP BY etf_ticker) cs ON cs.etfTicker = w.ticker WHERE s.last_synced_at IS NULL OR s.status = 'error' OR COALESCE(cs.actualRecordsCount, s.records_count, 0) = 0 OR (julianday('now') - julianday(s.last_synced_at)) >= ? ORDER BY CASE WHEN s.last_synced_at IS NULL THEN 0 WHEN s.status = 'error' THEN 1 WHEN COALESCE(cs.actualRecordsCount, s.records_count, 0) = 0 THEN 2 ELSE 3 END, datetime(COALESCE(s.last_synced_at, '1970-01-01 00:00:00')) ASC, w.ticker ASC LIMIT ?",
-      )
-        .bind(staleDays, maxPerRun)
-        .all<{ ticker: string; lastSyncedAt: string | null; status: string | null; coverage?: string | null; sourceTier?: string | null; recordsCount: number | null; actualRecordsCount: number | null }>();
-    }
-  })();
-  const selected = staleRows.results ?? [];
-  for (const row of selected) {
-    try {
-      await syncEtfConstituents(env, row.ticker);
+      await syncEtfConstituents(env, ticker);
     } catch (error) {
-      console.error("scheduled etf constituent sync failed", row.ticker, error);
+      console.error("scheduled etf constituent sync failed", ticker, error);
     }
   }
 }

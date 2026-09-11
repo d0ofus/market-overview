@@ -1,5 +1,6 @@
 import { parseLocalTime, zonedParts } from "./refresh-timing";
 import type { Env } from "./types";
+import { ETF_HOLDINGS_REFRESH_DAYS } from "./etf-refresh-schedule";
 
 export const CRON_TIMEZONE_OPTIONS = [
   { label: "Melbourne", value: "Australia/Melbourne" },
@@ -206,7 +207,7 @@ export const CENTRAL_CRON_JOB_DEFINITIONS: CentralCronJobDefinition[] = [
     category: "Market/Data",
     description: "Refreshes a small stale slice of ETF constituent data per worker tick.",
     kind: "runtime",
-    defaults: { enabled: true, staleDays: 14, batchLimit: 5 },
+    defaults: { enabled: true, staleDays: ETF_HOLDINGS_REFRESH_DAYS, batchLimit: 5 },
     fields: [
       ENABLED_FIELD,
       { key: "staleDays", label: "Stale after days", type: "number", min: 1, max: 90, step: 1 },

@@ -55,3 +55,11 @@ Database-format compatibility does not establish that the entire account's workl
 ## Production acceptance
 
 Recovery completes when the full copy and consumer parity pass, the latest eligible session has accepted Overview and independent Breadth publications, measured storage and deployed runtime checks pass, public readers use the verified target, and the final production configuration is recorded. Failures remain visible in Admin with the failed stage and actual retry state. A deployment or an accepted GitHub dispatch alone does not establish data readiness.
+
+## Auxiliary source correctness
+
+Active daily commentary follows the accepted EOD session and publication revisions. A later-dated premarket placeholder cannot hide it. Weekly inputs select one report per session; a failed current attempt remains separate from a dated older successful report. Public FOMC reads use stored official material, while scheduled refresh remains responsible for collection.
+
+RateProbability attempts have durable ownership and cooldowns, including a 24-hour pause after HTTP 403. Dated last-good estimates remain visible only for applicable meetings, independently of official policy facts and EFFR. Holdings validation rejects mixed-fund lists and inconsistent weights, preserves explicit percentage units, and identifies physical bullion separately from equities.
+
+EATZ's last trading session was April 30, 2026, and liquidation proceeds were distributed on May 7. The configured instrument and its historical prices remain retained; current prices are unavailable and its contaminated holdings cache is quarantined. This is a closed fund, not an ingestion outage. Sources: [issuer announcement](https://www.sec.gov/Archives/edgar/data/1408970/000182912626003345/advisorshares-eatz_497.htm), [OCC liquidation confirmation](https://infomemo.theocc.com/infomemos?number=58928).

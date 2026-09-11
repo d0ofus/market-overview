@@ -1,11 +1,11 @@
 import { getMarketDataDb,marketDataFeed } from "./market-data-db";
 import { expectedEodSession } from "./eod-coordinator";
-import { loadEodCatalogRows } from "./eod-catalog-service";
+import { EodCatalogUnavailableError, loadEodCatalogRows } from "./eod-catalog-service";
 import type { Env } from "./types";
 
 export async function getStoredHoldingStats(env:Env,tickers:string[]) {
   const unique=Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
-  const map=new Map<string,{lastPrice:number|null;change1d:number|null;barDate:string|null;source:string|null}>();
+  const map=new Map<string,{lastPrice:number|null;change1d:number|null;barDate:string|null;source:string|null;unavailableReason?:string}>();
   for (const ticker of unique) map.set(ticker,{lastPrice:null,change1d:null,barDate:null,source:null});
   if (!unique.length) return map;
   const completedSession=await expectedEodSession(env);
@@ -13,7 +13,15 @@ export async function getStoredHoldingStats(env:Env,tickers:string[]) {
   if (env.MARKET_HISTORY_DB && env.EOD_READ_ENABLED === "true") {
     // Full holding lists can exceed a thousand symbols. Their compact accepted
     // metadata avoids one archive decompression/query group per holding batch.
-    const catalog=await loadEodCatalogRows(env,unique,completedSession,{unavailableRows:"omit"});
+    let catalog:Awaited<ReturnType<typeof loadEodCatalogRows>>;
+    try { catalog=await loadEodCatalogRows(env,unique,completedSession,{unavailableRows:"omit"}); }
+    catch(error) {
+      if (!(error instanceof EodCatalogUnavailableError)) throw error;
+      // A pending or invalid exact-session catalog does not invalidate the
+      // separately dated holdings. Preserve rows and explicit unavailable prices.
+      for (const value of map.values()) value.unavailableReason=error.code;
+      return map;
+    }
     const dates=[...new Set([...catalog.values()].flatMap((row) => row.lastDate ? [row.lastDate] : []))];
     const sessions=await getMarketDataDb(env).prepare(`SELECT session_date AS date,
       (SELECT MAX(previous.session_date) FROM market_calendar_sessions previous WHERE previous.session_date<current.session_date) AS previousDate

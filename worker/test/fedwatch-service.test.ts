@@ -71,6 +71,7 @@ describe("fed funds rate service helpers", () => {
 
   it("returns null when required current rows are missing", () => {
     expect(normalizeRateProbabilityPayload({ today: { rows: [] } }, "2026-03-24T00:00:00.000Z")).toBeNull();
+    expect(normalizeRateProbabilityPayload({today:{as_of:"2026-03-23",rows:[null as never]}},"2026-03-24T00:00:00.000Z")).toBeNull();
   });
 
   it("treats recent snapshots as fresh on an hourly cache window", () => {

@@ -204,7 +204,7 @@ export function MarketCommentaryPanel({ initial, overviewFreshness = null }: Pro
   const report = mode === "daily" ? dailyReport : weeklyReport;
   const sources = mode === "daily" ? dailyReport?.sourceAudit ?? [] : weeklyReport?.sourceAudit ?? [];
   const dataQuality = mode === "daily" ? dailyReport?.dataQuality ?? [] : weeklyReport?.dataQuality ?? [];
-  const latestAttempt = mode === "daily" ? commentary.latestAttempt ?? null : null;
+  const latestAttempt = mode === "daily" ? commentary.latestAttempt ?? null : weeklyReview.latestAttempt ?? null;
   const hasReport = Boolean(report);
   const activeMarkdown = mode === "daily" ? dailyReport?.reportMarkdown : weeklyReport?.reviewMarkdown;
   const commentaryFreshness = deriveCommentaryFreshnessSummary({
@@ -212,6 +212,7 @@ export function MarketCommentaryPanel({ initial, overviewFreshness = null }: Pro
     status: activeStatus,
     warning: activeWarning,
     report,
+    expectedWeekEnd: mode === "weekly" ? weeklyReview.expectedWeek?.weekEnd : null,
     dataQuality,
     overview: overviewFreshness,
   });
@@ -408,7 +409,7 @@ export function MarketCommentaryPanel({ initial, overviewFreshness = null }: Pro
               <p className="mt-1 truncate text-xs text-text/60">
                 {summaryText}
               </p>
-              {mode === "daily" && commentaryFreshness.label === "Old report" && latestAttempt ? (
+              {latestAttempt && (commentaryFreshness.label === "Old report" || latestAttempt.status === "failed") ? (
                 <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-warning">
                   <span>Latest attempt {formatDateTime(latestAttempt.attemptedAt)}</span>
                   <span className="rounded-full border border-warning/30 bg-warning/10 px-1.5 py-0.5">{latestAttempt.status}</span>

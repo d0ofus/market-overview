@@ -2,6 +2,7 @@ import { meteredFetch,ProviderBudgetExceededError } from "./provider-usage";
 import type { Env } from "./types";
 import type { MarketHistoryBar } from "./market-history";
 import { assertYahooArchiveCapacity } from "./eod-fallback-storage";
+import { getEtfLifecycle } from "./etf-holdings-quality";
 
 type AlpacaBar = { t: string; o: number; h: number; l: number; c: number; v: number };
 export type EodPriceBar = MarketHistoryBar & { reportedVolume: number | null };
@@ -167,7 +168,8 @@ export class EodPriceProvider {
             reportedVolume: adjustment === "raw" ? volume : null, feed: "sip", sourceProvider: "alpaca",
             reportedVolumeCollectedAt:adjustment === "raw" && volume!==null ? fetchedAt : null,
             adjustment, observedAt: fetchedAt, fetchedAt };
-          if (date < start || !validEodBar(bar, target)) continue;
+          const lifecycle = getEtfLifecycle(ticker);
+          if (date < start || !validEodBar(bar, target) || (lifecycle && date > lifecycle.lastTradingDate)) continue;
           const key = `${ticker}:${date}`;
           const previous = out.get(key);
           if (previous && ["o", "h", "l", "c", "volume"].some((field) =>
@@ -188,6 +190,13 @@ export class EodPriceProvider {
     const unique = Array.from(new Set(tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean)));
     if (unique.length > MAX_ALPACA_SYMBOLS) throw new Error("alpaca-symbol-batch-limit");
     const supported = unique.filter((ticker) => {
+      const lifecycle = getEtfLifecycle(ticker);
+      if (lifecycle && target > lifecycle.lastTradingDate) {
+        this.symbolErrors.set(ticker, `fund-liquidated:last-trading-session-${lifecycle.lastTradingDate}`);
+        // Historical repair remains available; no current-window request can
+        // return a valid observation after the documented final trading date.
+        if (start > lifecycle.lastTradingDate) return false;
+      }
       if (!INDEX_SYMBOLS[ticker]) return true;
       this.symbolErrors.set(ticker, "alpaca-index-unsupported");
       return false;
@@ -215,6 +224,11 @@ export class EodPriceProvider {
 
   async yahoo(tickerInput: string, start: string, target: string, overlap: EodPriceBar[]): Promise<EodPriceBar[]> {
     const ticker = tickerInput.trim().toUpperCase();
+    const lifecycle = getEtfLifecycle(ticker);
+    if (lifecycle && target > lifecycle.lastTradingDate) {
+      if (start > lifecycle.lastTradingDate) throw new Error(`fund-liquidated:last-trading-session-${lifecycle.lastTradingDate}`);
+      target = lifecycle.lastTradingDate;
+    }
     if (this.env.MARKET_HISTORY_DB) await assertYahooArchiveCapacity(this.env.MARKET_HISTORY_DB, ticker);
     const bounds = range(start, target);
     const symbol = yahooEodSymbol(ticker);

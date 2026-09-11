@@ -45,6 +45,23 @@ function readEnv(snapshot: SnapshotReadyResponse, completed: string | null) {
 
 describe("EOD Overview publication/UI contract", () => {
   afterEach(() => vi.useRealTimers());
+  it("preserves a liquidated configured row and rejects an impossible post-closure current price", async () => {
+    const input = fixture();
+    const item = input.inputs.config.sections[0]!.groups[1]!.items[0]!;
+    item.ticker = "EATZ";
+    input.features.set("EATZ", {...input.features.get("ABC")!,ticker:"EATZ"});
+    const snapshot = overviewPayload(input.inputs,input.features,input.session);
+    const {env} = readEnv(snapshot,input.session);
+    const result = await loadEodOverview(env);
+    const closed = result!.sections[0]!.groups[1]!.rows[0]!;
+    expect(closed.ticker).toBe("EATZ");
+    expect(closed.price).toBeNull();
+    expect(closed.change1d).toBeNull();
+    expect(closed.currentData?.reason).toContain("fund liquidated 2026-05-07");
+    expect(closed.currentData?.reason).toContain("2026-04-30");
+    expect(closed.currentData?.reason).toContain("sec.gov");
+    expect(result?.freshnessEligibleCount).toBe(12);
+  });
   it("retains a dated provider failure for configured unavailable instruments",async () => {
     const input=fixture();
     const snapshot=overviewPayload(input.inputs,input.features,input.session,{S0:"yahoo-security-identity-mismatch"});

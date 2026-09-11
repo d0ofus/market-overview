@@ -141,8 +141,8 @@ describe("ETF constituent parsers", () => {
               return makeStatement(nextArgs);
             },
             async first<T>() {
-              if (sql.includes("COUNT(*) as count FROM etf_constituents")) {
-                return { count: 30 } as T;
+              if (sql.includes("COUNT(*) as count") && sql.includes("FROM etf_constituents")) {
+                return { count: 30, asOfDate: "2026-05-15" } as T;
               }
               if (sql.includes("source_url as sourceUrl") && sql.includes("etf_watchlists")) {
                 return { sourceUrl: null, fundName: null } as T;
@@ -183,6 +183,7 @@ describe("ETF constituent parsers", () => {
       sourceTier: "official",
       coverage: "full",
       skippedPartialOverwrite: true,
+      asOfDate: "2026-05-15",
     });
     expect(batch).not.toHaveBeenCalled();
     expect(runs[0]?.args).toContain("official:test-provider");

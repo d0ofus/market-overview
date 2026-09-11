@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getStoredHoldingStats } from "../src/eod-holdings-quotes";
 import type { Env } from "../src/types";
 import { createSqliteD1 } from "./helpers/sqlite-d1";
+import { readFileSync } from "node:fs";
+import worker from "../src/index";
 
 describe("stored holding quotes against migrated SQLite", () => {
   let storage: ReturnType<typeof createSqliteD1>;
@@ -19,7 +21,7 @@ describe("stored holding quotes against migrated SQLite", () => {
       ('2026-11-25','09:30','16:00','alpaca-calendar'),('2026-11-27','09:30','13:00','alpaca-calendar'),
       ('2026-11-30','09:30','16:00','alpaca-calendar');`);
   },30_000);
-  afterEach(() => {storage?.dispose();vi.useRealTimers();vi.unstubAllGlobals();});
+  afterEach(() => {storage?.dispose();vi.useRealTimers();vi.unstubAllGlobals();vi.restoreAllMocks();});
   async function bars(rows:Array<[string,string,number,string?,string?]>) {
     const statements=rows.map(([ticker,date,close,provider="alpaca",adjustment="split"]) => storage.db.prepare(`INSERT INTO alpaca_daily_bars(feed,ticker,date,o,h,l,c,volume,source_provider,adjustment)
       VALUES('sip',?,?,?,?,?,?,100,?,?)`).bind(ticker,date,close,close,close,close,provider,adjustment));
@@ -60,5 +62,40 @@ describe("stored holding quotes against migrated SQLite", () => {
     const unavailable=await getStoredHoldingStats(env,["AAA","BBB"]);
     expect(unavailable.size).toBe(2);
     for(const value of unavailable.values()) expect(value).toEqual({lastPrice:null,change1d:null,barDate:null,source:null});
+  });
+  it("keeps all requested holdings explicitly unavailable while the exact-session catalog is pending",async()=>{
+    env.MARKET_HISTORY_DB={} as D1Database;env.EOD_READ_ENABLED="true";
+    const fetcher=vi.fn();vi.stubGlobal("fetch",fetcher);
+    const result=await getStoredHoldingStats(env,Array.from({length:105},(_,i)=>`T${i}`));
+    expect(result.size).toBe(105);
+    for(const value of result.values()) expect(value).toEqual({lastPrice:null,change1d:null,barDate:null,source:null,unavailableReason:"eod-catalog-unavailable"});
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it("does not turn D1 infrastructure failures into a pending catalog",async()=>{
+    env.MARKET_HISTORY_DB={} as D1Database;env.EOD_READ_ENABLED="true";
+    const prepare=env.MARKET_DATA_DB!.prepare.bind(env.MARKET_DATA_DB);
+    vi.spyOn(env.MARKET_DATA_DB!,"prepare").mockImplementation(sql=>{
+      if(sql.includes("eod_publications")) throw new Error("fixture-d1-unavailable");
+      return prepare(sql);
+    });
+    await expect(getStoredHoldingStats(env,["META"])).rejects.toThrow("fixture-d1-unavailable");
+  });
+  it("serves dated holdings with HTTP200 and null prices when today's catalog is absent, and never quotes Bitcoin as BTC equity",async()=>{
+    storage.script("CREATE TABLE symbols(ticker TEXT PRIMARY KEY,name TEXT,exchange TEXT,asset_class TEXT,sector TEXT,industry TEXT);\n"+
+      ["0006_etf_watchlists_and_constituents.sql","0009_etf_watchlist_source_url.sql","0051_etf_sync_metadata.sql"].map(name=>readFileSync(`migrations/${name}`,"utf8")).join("\n")+
+      "INSERT INTO etf_watchlists(list_type,ticker,fund_name) VALUES('industry','IBIT','iShares Bitcoin Trust ETF');\n"+
+      "INSERT INTO etf_constituents(id,etf_ticker,constituent_ticker,constituent_name,weight,as_of_date,source) VALUES('meta','XLC','META','Meta',20,'2025-01-09','ssga:fund-data'),('btc','IBIT','BTC','Bitcoin',100,NULL,'ishares:single-asset');");
+    env.MARKET_HISTORY_DB={} as D1Database;env.EOD_READ_ENABLED="true";
+    const fetcher=vi.fn();vi.stubGlobal("fetch",fetcher);
+    const response=await worker.fetch(new Request("https://example.com/api/etf/XLC/constituents"),env,{} as ExecutionContext);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({rows:[{ticker:"META",asOfDate:"2025-01-09",lastPrice:null,change1d:null,priceStatus:"eod-catalog-unavailable"}],
+      warning:expect.stringContaining("expected EOD price catalog is unavailable")});
+    const prepare=vi.spyOn(env.MARKET_DATA_DB!,"prepare");
+    const crypto=await worker.fetch(new Request("https://example.com/api/etf/IBIT/constituents"),env,{} as ExecutionContext);
+    expect(crypto.status).toBe(200);
+    expect(await crypto.json()).toMatchObject({rows:[{ticker:"BTC",weight:null,assetType:"crypto",chartEligible:false,lastPrice:null,priceStatus:"crypto-asset-no-equity-quote"}]});
+    expect(prepare.mock.calls.some(([sql])=>sql.includes("eod_publications") || sql.includes("alpaca_daily_bars"))).toBe(false);
+    expect(fetcher).not.toHaveBeenCalled();
   });
 });

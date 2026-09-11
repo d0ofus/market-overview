@@ -16,6 +16,7 @@ export type TickerCollectionModalItem = {
   metricValue?: string | null;
   badges?: ReactNode;
   stats?: ReactNode;
+  chartUnavailableReason?: string | null;
 };
 
 export function TickerCollectionModal({
@@ -129,7 +130,7 @@ export function TickerCollectionModal({
 
                   {item.badges ? <div className="mb-4 flex items-center gap-2 text-sm">{item.badges}</div> : null}
 
-                  <div className="rounded-[22px] bg-slate-950/20 p-2.5">
+                  {item.chartUnavailableReason ? <p className="py-6 text-sm text-slate-400">{item.chartUnavailableReason}</p> : <><div className="rounded-[22px] bg-slate-950/20 p-2.5">
                     <TradingViewWidget
                       ticker={item.ticker}
                       size="small"
@@ -145,7 +146,7 @@ export function TickerCollectionModal({
                       <Maximize2 className="h-3.5 w-3.5" />
                       Expand chart
                     </button>
-                  </div>
+                  </div></>}
                 </div>
               ))}
               {totalItems === 0 ? (

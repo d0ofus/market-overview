@@ -48,6 +48,14 @@ function createCronSettingsEnv(initial: Record<string, Record<string, unknown>> 
 }
 
 describe("central cron job settings", () => {
+  it("defaults holdings freshness to seven days and preserves explicit saved overrides", async () => {
+    expect(await loadCentralCronJobSettings(createCronSettingsEnv(), "etf-constituent-slice"))
+      .toMatchObject({ staleDays: 7, batchLimit: 5 });
+    expect(await loadCentralCronJobSettings(createCronSettingsEnv({
+      "etf-constituent-slice": { staleDays: 14 },
+    }), "etf-constituent-slice")).toMatchObject({ staleDays: 14 });
+  });
+
   it("returns defaults when no cron settings rows exist", async () => {
     const env = createCronSettingsEnv();
     const settings = await loadCentralCronJobSettings(env, "earnings-gaps");

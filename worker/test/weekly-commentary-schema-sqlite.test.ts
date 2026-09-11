@@ -17,6 +17,10 @@ describe("weekly daily-commentary source against migrated SQLite", () => {
     for (const [id, date, status, text, timestamp] of [
       ["previous", "2026-08-21", "ready", "OUTSIDE PREVIOUS WEEK", "2026-08-22T01:00:00Z"],
       ["monday", "2026-08-24", "ready", "Monday verified facts", "2026-08-25T01:00:00Z"],
+      ["friday-obsolete", "2026-08-28", "ready", "OBSOLETE FRIDAY REVISION", "2026-08-28T22:00:00Z"],
+      ["friday-obsolete-2", "2026-08-28", "ready", "OBSOLETE FRIDAY REVISION", "2026-08-28T23:00:00Z"],
+      ["friday-obsolete-3", "2026-08-28", "ready", "OBSOLETE FRIDAY REVISION", "2026-08-29T00:00:00Z"],
+      ["friday-obsolete-4", "2026-08-28", "ready", "OBSOLETE FRIDAY REVISION", "2026-08-29T00:30:00Z"],
       ["friday", "2026-08-28", "ready", "Friday verified facts", "2026-08-29T01:00:00Z"],
       ["failed", "2026-08-28", "failed", "FAILED GENERATION", "2026-08-29T02:00:00Z"],
       ["next", "2026-08-31", "ready", "OUTSIDE NEXT WEEK", "2026-09-01T01:00:00Z"],
@@ -29,7 +33,7 @@ describe("weekly daily-commentary source against migrated SQLite", () => {
 
     expect(summary).toContain("Friday verified facts");
     expect(summary).toContain("Monday verified facts");
-    expect(summary).not.toMatch(/OUTSIDE|FAILED GENERATION|no such column/);
+    expect(summary).not.toMatch(/OUTSIDE|OBSOLETE|FAILED GENERATION|no such column/);
     expect(summary.indexOf("Friday")).toBeLessThan(summary.indexOf("Monday"));
     expect(audit[0]?.timestamp).toBe("2026-08-29T01:00:00Z");
     expect(quality).toEqual([{ metric: "Recent daily commentary", status: "ok", note: "Loaded 2 recent daily commentary reports." }]);

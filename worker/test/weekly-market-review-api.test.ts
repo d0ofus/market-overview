@@ -97,7 +97,7 @@ class FakeWeeklyReviewDb {
           if (normalized.includes("week_end = ?")) {
             return (db.rows
               .filter((row) => row.weekEnd === String(bound[0]))
-              .sort(sortPreferred)[0] ?? null) as T;
+              .sort(sortLatest)[0] ?? null) as T;
           }
         }
         return null as T;

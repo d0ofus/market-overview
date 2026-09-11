@@ -236,7 +236,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
   const [constituentLoading, setConstituentLoading] = useState(false);
   const [constituentWarning, setConstituentWarning] = useState<string | null>(null);
   const [constituentMetadata, setConstituentMetadata] = useState<string | null>(null);
-  const [constituents, setConstituents] = useState<Array<{ ticker: string; name: string | null; weight: number | null; change1d?: number; lastPrice?: number; priceSessionDate?: string | null; priceStatus?: string | null; priceSource?: string | null; asOfDate?: string | null }>>([]);
+  const [constituents, setConstituents] = useState<Array<{ ticker: string; name: string | null; weight: number | null; change1d?: number; lastPrice?: number; priceSessionDate?: string | null; priceStatus?: string | null; priceSource?: string | null; asOfDate?: string | null; assetType?: string; chartEligible?: boolean }>>([]);
   const [constituentSort, setConstituentSort] = useState<"weight" | "change1d">("change1d");
   const [activeChartTicker, setActiveChartTicker] = useState<string | null>(null);
   const hoverChart = useHoverChartPreview({ disabled: Boolean(activeChartTicker || activeEtf) });
@@ -447,6 +447,8 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
         priceStatus: row.priceStatus ?? null,
         priceSource: row.priceSource ?? null,
         asOfDate: row.asOfDate ?? null,
+        assetType: row.assetType,
+        chartEligible: row.chartEligible !== false,
       })));
       setConstituentWarning(res.warning ?? res.syncStatus?.error ?? null);
       setConstituentMetadata(`Holdings source: ${res.syncStatus?.source ?? "unknown"}; coverage: ${res.syncStatus?.coverage ?? "unknown"}. Last full success: ${res.syncStatus?.lastFullSyncedAt ?? "unknown"}; latest attempt: ${res.syncStatus?.lastSyncedAt ?? "unknown"} (${res.syncStatus?.status ?? "unknown"}).`);
@@ -579,7 +581,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
                       </div>
                       <p className="mb-1 text-[10px] text-slate-400">Price session {row.priceSessionDate ?? "unavailable"} ? {row.priceSource ?? "source unavailable"}; holdings effective {row.asOfDate ?? "unknown"}.</p>
                       <p className="mb-2 line-clamp-2 text-xs text-slate-400">{row.name ?? row.ticker}</p>
-                      <TradingViewWidget
+                      {row.chartEligible === false ? <p className="py-6 text-xs text-slate-400">{row.assetType === "crypto" ? "Crypto asset" : "Physical holding"}; an equity quote or chart does not apply.</p> : <><TradingViewWidget
                         ticker={row.ticker}
                         size="small"
                         chartOnly
@@ -593,7 +595,7 @@ export function GroupPanel({ title, rows, columns, defaultOpen = true, pinTop10 
                       >
                         <Maximize2 className="h-3.5 w-3.5" />
                         Expand chart
-                      </button>
+                      </button></>}
                     </div>
                   ))}
                   {constituents.length === 0 && (

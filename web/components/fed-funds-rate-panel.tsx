@@ -5,6 +5,7 @@ import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, X
 import type { FedFundsComparisonSeries, FedFundsPathRow, FedWatchResponse, FomcCommentaryItem } from "@/lib/api";
 import { groupFomcCommentaryItems } from "@/lib/fomc-commentary";
 import { fedFundsPricingHeadline } from "@/lib/fed-funds-pricing";
+import { applicableFedFundsSnapshot } from "@/lib/fed-funds-applicability";
 
 const DECISION_TZ = "America/New_York";
 const DECISION_HOUR = 14;
@@ -150,7 +151,7 @@ function buildChartData(
 
   return [
     {
-      label: "Current",
+      label: "Source-date band",
       meetingIso: "current",
       current: currentMidpoint,
       ago_1w: null,
@@ -310,9 +311,10 @@ function FomcCommentarySection({ items }: { items: FomcCommentaryItem[] }) {
   );
 }
 
-export function FedFundsRatePanel({ snapshot }: { snapshot: FedWatchResponse }) {
-  const rows = snapshot.data?.rows ?? [];
+export function FedFundsRatePanel({ snapshot: received }: { snapshot: FedWatchResponse }) {
   const [now, setNow] = useState<number | null>(null);
+  const snapshot=useMemo(()=>now===null ? received : applicableFedFundsSnapshot(received,now),[received,now]);
+  const rows = snapshot.data?.rows ?? [];
   const nextMeeting = rows.find((row) => zonedTimeToUtc(row.meetingIso, DECISION_HOUR, DECISION_MINUTE, DECISION_TZ).getTime() > (now ?? Date.now())) ?? null;
 
   useEffect(() => {
@@ -359,10 +361,10 @@ export function FedFundsRatePanel({ snapshot }: { snapshot: FedWatchResponse }) 
             <p className="text-sm text-slate-400">Official Rate Facts and Dated Market Pricing</p>
           </div>
           <div className="flex flex-wrap gap-x-5 gap-y-2 text-sm text-slate-300">
-            <span>Probability source date: <span className="font-medium text-text">{snapshot.data?.asOf ?? "Unavailable"}</span></span>
-            <span>Target Band: <span className="font-medium text-text">{snapshot.data?.currentBand ?? "Unavailable"}</span></span>
-            <span>Midpoint: <span className="font-medium text-text">{ratePct(snapshot.data?.midpoint, 3)}</span></span>
-            <span>Last EFFR: <span className="font-medium text-text">{ratePct(snapshot.data?.mostRecentEffr, 2)}</span></span>
+            <span>Probability source date: <span className="font-medium text-text">{snapshot.data?.asOf ?? snapshot.probabilitySource?.asOf ?? "Unavailable"}</span></span>
+            <span>Provider band on source date: <span className="font-medium text-text">{snapshot.data?.currentBand ?? "Unavailable"}</span></span>
+            <span>Provider midpoint: <span className="font-medium text-text">{ratePct(snapshot.data?.midpoint, 3)}</span></span>
+            <span>Provider EFFR on source date: <span className="font-medium text-text">{ratePct(snapshot.data?.mostRecentEffr, 2)}</span></span>
             <span>Step: <span className="font-medium text-text">{snapshot.data?.assumedMoveBps ?? "N/A"} bps</span></span>
             <span>
               Source:{" "}
@@ -400,7 +402,7 @@ export function FedFundsRatePanel({ snapshot }: { snapshot: FedWatchResponse }) 
           <div className="rounded-2xl border border-borderSoft/70 bg-panelSoft/70 p-5">
             <div className="text-sm font-semibold text-text">Fed funds pricing unavailable</div>
             <p className="mt-2 text-sm text-slate-400">
-              The RateProbability API could not be reached from this environment. When it recovers, this section will automatically show the cached or live rate path again.
+              No applicable, validated meeting probabilities are currently available. Official rate facts remain separate. Scheduled recovery will retry the probability source.
             </p>
             <a
               className="mt-4 inline-flex rounded-xl bg-accent/20 px-3 py-2 text-sm font-medium text-accent hover:bg-accent/30"
@@ -430,7 +432,7 @@ export function FedFundsRatePanel({ snapshot }: { snapshot: FedWatchResponse }) 
             <div className="rounded-2xl border border-borderSoft/70 bg-panelSoft/80 p-4">
               <div className="text-xs uppercase tracking-[0.2em] text-slate-400">Rate on probability source date</div>
               <div className="mt-2 text-3xl font-semibold text-text">{ratePct(snapshot.data.midpoint, 2)}</div>
-              <div className="mt-3 text-sm text-slate-400">Last EFFR: {ratePct(snapshot.data.mostRecentEffr, 3)}</div>
+              <div className="mt-3 text-sm text-slate-400">Provider EFFR on source date: {ratePct(snapshot.data.mostRecentEffr, 3)}</div>
             </div>
           </div>
 
@@ -445,7 +447,7 @@ export function FedFundsRatePanel({ snapshot }: { snapshot: FedWatchResponse }) 
                       <th className="px-3 py-2 text-right text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">Implied Rate (Post-Meeting)</th>
                       <th className="px-3 py-2 text-right text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">Probability of Hike(Cut)</th>
                       <th className="px-3 py-2 text-right text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300"># of Hikes(Cuts)</th>
-                      <th className="px-3 py-2 text-right text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">Delta vs Current (bps)</th>
+                      <th className="px-3 py-2 text-right text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-300">Delta vs Source-Date Band (bps)</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -507,7 +509,7 @@ export function FedFundsRatePanel({ snapshot }: { snapshot: FedWatchResponse }) 
                       strokeWidth={2.5}
                       dot={{ r: 3 }}
                       activeDot={{ r: 5 }}
-                      connectNulls
+                      connectNulls={false}
                     />
                     {comparisonLines.map((series) => (
                       <Line
@@ -519,7 +521,7 @@ export function FedFundsRatePanel({ snapshot }: { snapshot: FedWatchResponse }) 
                         strokeWidth={2}
                         dot={{ r: 2.5 }}
                         activeDot={{ r: 4 }}
-                        connectNulls
+                        connectNulls={false}
                       />
                     ))}
                   </LineChart>

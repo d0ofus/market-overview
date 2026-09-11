@@ -536,6 +536,11 @@ function normalizeRow(row: MarketCommentaryRow): MarketCommentaryReport {
 
 export async function loadLatestMarketCommentary(env: Env): Promise<MarketCommentaryResponse> {
   const scheduledAttempt = await loadLatestPublicScheduleAttempt(env);
+  if (env.EOD_RUNNER_MODE === "active" && env.EOD_READ_ENABLED === "true") {
+    const latestAttemptRow = await env.DB.prepare(`${MARKET_COMMENTARY_REPORT_SELECT} ORDER BY created_at DESC,id DESC LIMIT 1`)
+      .first<MarketCommentaryRow>();
+    return loadAcceptedEodMarketCommentary(env, latestAttemptRow, scheduledAttempt);
+  }
   const row = await env.DB.prepare(
     `${MARKET_COMMENTARY_REPORT_SELECT} ORDER BY session_date DESC, created_at DESC LIMIT 1`,
   ).first<MarketCommentaryRow>();
@@ -579,6 +584,57 @@ export async function loadLatestMarketCommentary(env: Env): Promise<MarketCommen
     report: normalizeRow(readyRow),
     latestAttempt: newerAttempt(publicAttempt(row), scheduledAttempt),
   };
+}
+
+async function loadAcceptedEodMarketCommentary(env: Env, latestRow: MarketCommentaryRow | null,
+  scheduledAttempt: MarketCommentaryAttemptSummary | null,
+  options: { sessionDate?: string; allowFallback?: boolean } = {}): Promise<MarketCommentaryResponse> {
+  const latestAttempt = latestRow ? newerAttempt(publicAttempt(latestRow), scheduledAttempt) : scheduledAttempt;
+  const snapshot = await loadEodOverview(env, "default", options.sessionDate).catch(() => null);
+  if (!snapshot) return {
+    status: "empty", report: null, latestAttempt,
+    warning: "Commentary is awaiting an accepted EOD Overview publication.",
+  };
+  const sessionDate = snapshot.asOfDate, publication = snapshot.generationId ?? snapshot.generatedAt;
+  const breadth = await loadFactualBreadthEvidence(env, sessionDate, publication);
+  // The accepted session and publication identities are authoritative. A newer
+  // pre-market report date, or a report written before a correction, cannot
+  // outrank the report that actually consumed these published observations.
+  const auditRows = "json_each(CASE WHEN json_valid(source_audit_json) THEN source_audit_json ELSE '[]' END)";
+  const matching = breadth.readAvailable ? await env.DB.prepare(`${MARKET_COMMENTARY_REPORT_SELECT}
+    WHERE session_date=? AND status='ready'
+      AND EXISTS(SELECT 1 FROM ${auditRows} source WHERE json_extract(source.value,'$.sourceName')=? AND json_extract(source.value,'$.note')=?)
+      AND EXISTS(SELECT 1 FROM ${auditRows} source WHERE json_extract(source.value,'$.sourceName')=? AND json_extract(source.value,'$.note')=?)
+    ORDER BY created_at DESC,id DESC LIMIT 1`)
+    .bind(sessionDate, "Market Command dashboard snapshot", `Overview publication: ${publication}`,
+      EOD_REPORT_PUBLICATION_SOURCE, breadth.identity).first<MarketCommentaryRow>() : null;
+  const fallback = matching || options.allowFallback === false ? null : await env.DB.prepare(`${MARKET_COMMENTARY_REPORT_SELECT}
+    WHERE session_date<=? AND status='ready'
+      AND EXISTS(SELECT 1 FROM ${auditRows} source WHERE json_extract(source.value,'$.sourceName')=?
+        AND json_extract(source.value,'$.note') LIKE 'Overview publication: %')
+      AND EXISTS(SELECT 1 FROM ${auditRows} source WHERE json_extract(source.value,'$.sourceName')=?)
+    ORDER BY session_date DESC,created_at DESC,id DESC LIMIT 1`)
+    .bind(sessionDate, "Market Command dashboard snapshot", EOD_REPORT_PUBLICATION_SOURCE).first<MarketCommentaryRow>();
+  const selected = matching ?? fallback;
+  if (!selected) return {
+    status: latestAttempt?.status === "failed" ? "failed" : "empty", report: null, latestAttempt,
+    warning: `Commentary is awaiting the accepted EOD publications for ${sessionDate}.`,
+  };
+  const warnings = [
+    selected.provider === FACTUAL_REPORT_PROVIDER ? "Factual report; AI interpretation unavailable." : null,
+    !matching ? `Showing dated commentary for ${selected.sessionDate}; it has not yet been updated for the accepted ${sessionDate} publication revisions.` : null,
+    sessionDate < getUsMarketSessionContext().latestCompletedSessionDate ? `Latest accepted EOD observations are dated ${sessionDate}; a newer completed US session is available.` : null,
+    latestAttempt?.status === "failed" ? "The latest commentary refresh failed; its attempt status is shown separately." : null,
+  ].filter(Boolean);
+  return { status: "ready", report: normalizeRow(selected), latestAttempt, warning: warnings.join(" ") || null };
+}
+
+/** Weekly inputs require one report matching each session's currently accepted
+ * revisions. An older revision may remain visible to readers but cannot become
+ * the authoritative weekly input after a correction. */
+export async function loadAcceptedEodDailyReport(env: Env, sessionDate: string): Promise<MarketCommentaryReport | null> {
+  const response = await loadAcceptedEodMarketCommentary(env, null, null, { sessionDate, allowFallback: false });
+  return response.report?.sessionDate === sessionDate ? response.report : null;
 }
 
 function newerAttempt(

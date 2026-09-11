@@ -35,6 +35,31 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe("EOD Alpaca provider boundaries and isolation", () => {
+  it("keeps liquidated funds out of current requests while retaining the configured identity", async () => {
+    request.mockResolvedValueOnce(page({ AAA: [price()] }));
+    const provider = new EodPriceProvider(env);
+    expect((await complete(provider.alpaca(["EATZ", "AAA"], "2026-09-01", "2026-09-08"))).map(bar => bar.ticker)).toEqual(["AAA"]);
+    expect(new URL(String(request.mock.calls[0]![1])).searchParams.get("symbols")).toBe("AAA");
+    expect(provider.symbolErrors.get("EATZ")).toBe("fund-liquidated:last-trading-session-2026-04-30");
+    request.mockClear();
+    await expect(complete(provider.yahoo("EATZ", "2026-09-01", "2026-09-08", []))).rejects.toThrow("fund-liquidated");
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("preserves historical liquidated-fund bars and rejects observations beyond the final session", async () => {
+    request.mockResolvedValueOnce(page({ EATZ: [price("2026-04-30T04:00:00Z"), price()] }));
+    const bars = await complete(new EodPriceProvider(env).alpaca(["EATZ"], "2026-04-29", "2026-09-08"));
+    expect(bars.map(bar => bar.date)).toEqual(["2026-04-30"]);
+  });
+
+  it("allows historical Yahoo repair through a liquidated fund's actual final session", async () => {
+    request.mockResolvedValueOnce(yahooPayload({symbol:"EATZ",instrumentType:"ETF"}, ["2026-04-29T13:30:00Z","2026-04-30T13:30:00Z"]));
+    const overlap = ["2026-04-29","2026-04-30"].map(date => ({ticker:"EATZ",date,o:100,h:101,l:99,c:100,volume:1000,reportedVolume:1000,
+      feed:"sip",sourceProvider:"alpaca",adjustment:"split",observedAt:"2026-05-01T00:00:00Z",fetchedAt:"2026-05-01T00:00:00Z"}));
+    const bars = await complete(new EodPriceProvider(env).yahoo("EATZ","2026-04-29","2026-09-08",overlap));
+    expect(bars.map(bar => bar.date)).toEqual(["2026-04-29","2026-04-30"]);
+  });
+
   it("includes the first EDT daily bar and excludes surrounding New York sessions", async () => {
     request.mockResolvedValueOnce(page({ AAA: [price("2026-09-08T03:59:59Z"), price(), price("2026-09-09T04:00:00Z")] }));
     const bars = await complete(new EodPriceProvider(env).alpaca(["AAA"], "2026-09-08", "2026-09-08"));

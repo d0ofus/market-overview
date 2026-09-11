@@ -17,6 +17,7 @@ import { ProviderBudgetExceededError } from "./provider-usage";
 import { encodeEodPayload,decodeEodPayload } from "./eod-publication-codec";
 import { buildEodCatalogRow,encodeEodCatalogPayload,EOD_CATALOG_SCOPE,EOD_CATALOG_METHODOLOGY_VERSION,type EodCatalogRow } from "./eod-catalog-service";
 import { assessEodMembershipEvidence } from "./eod-membership-evidence";
+import { getEtfLifecycle } from "./etf-holdings-quality";
 
 type Membership = {universeId:string;versionId:string;source:string;sourceType:string|null;sourceUrl:string|null;sourceAsOfDate:string|null;verifiedAt:string|null;members:string[]};
 export type FrozenInputs = {config:DashboardConfigPayload;memberships:Membership[];tickers:string[];calendarDates:string[];methodologyVersion:string};
@@ -65,6 +66,10 @@ export function overviewPayload(inputs: FrozenInputs, features: Map<string, EodT
   const uniqueTickers = Array.from(new Set(items.map((item) => item.ticker)));
   const metricFor = (ticker: string): EodTickerMetrics => {
     const metric = features.get(ticker);
+    const lifecycle = getEtfLifecycle(ticker);
+    if (lifecycle && session > lifecycle.lastTradingDate && metric?.price != null) {
+      return computeEodTickerMetrics({ ticker, targetSession: session, calendarDates: inputs.calendarDates, bars: [] });
+    }
     return metric?.sessionDate === session && metric.methodologyVersion === inputs.methodologyVersion
       ? metric : computeEodTickerMetrics({ ticker, targetSession: session, calendarDates: inputs.calendarDates, bars: [] });
   };
@@ -108,7 +113,10 @@ export function overviewPayload(inputs: FrozenInputs, features: Map<string, EodT
           const seriesStatus = points.length < 2 ? "unavailable" as const
             : throughDate !== session ? "stale" as const : points.length !== m.sparkline.length ? "fallback" as const : "fresh" as const;
           const failure=diagnostics[item.ticker]?.slice(0,250);
+          const lifecycle = getEtfLifecycle(item.ticker);
+          const closed = lifecycle && session > lifecycle.lastTradingDate;
           const reason = hasPrice ? `Verified ${session} EOD close from ${source}; each populated metric requires its exact session window.`
+            : closed ? `No current price: fund liquidated ${lifecycle.liquidationDate}; last trading session ${lifecycle.lastTradingDate}. Source result: ${lifecycle.sourceUrl}`
             : `No verified EOD price for ${session}; no earlier quote is substituted.${failure ? ` Source result: ${failure}.` : ""}`;
           return {
             ticker: item.ticker, displayName: item.displayName, price: m.price, change1d: m.change1d, change1w: m.change1w,
@@ -336,6 +344,7 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
         const cached=stored.payloadCodec ? await decodeEodPayload({...stored,payload:"{}"}) as FeatureCheckpoint : stored;
         if (cached.catalogRows?.length===tickers.length && cached.catalogRows.every((row) => row.compatibility)
           && tickers.every((ticker) => cached.catalogRows.some((row) => row.ticker===ticker))
+          && tickers.every((ticker) => { const lifecycle=getEtfLifecycle(ticker); return !lifecycle || run.session_date<=lifecycle.lastTradingDate; })
           && cached.features.every(([,feature]) => feature.price!==null && feature.change1d!==null && feature.above200Sma!==null)) {
           cached.features.forEach(([ticker,feature]) => features.set(ticker,feature));
           cached.catalogRows.forEach((row) => catalogRows.set(row.ticker,row));
@@ -366,7 +375,10 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
       let fetchStart=inputs.calendarDates.at(-5)!;
       const existingKeys=new Set(history.filter((bar) => bar.sourceProvider==="alpaca" && bar.adjustment==="split").map((bar) => `${bar.ticker}:${bar.date}`));
       for (const date of inputs.calendarDates.slice(-260)) {
-        if (tickers.some((ticker) => !existingKeys.has(`${ticker}:${date}`))) { fetchStart=date; break; }
+        if (tickers.some((ticker) => {
+          const lifecycle = getEtfLifecycle(ticker);
+          return (!lifecycle || date <= lifecycle.lastTradingDate) && !existingKeys.has(`${ticker}:${date}`);
+        })) { fetchStart=date; break; }
       }
       const updated:EodPriceBar[]=[];
       try {
@@ -427,12 +439,16 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
       const chunkFeatures:Array<[string,EodTickerMetrics]>=[];
       for (const ticker of tickers) {
         checkContinuation();
-        const own=[...merged.values()].filter((bar) => bar.ticker===ticker && bar.sourceProvider==="alpaca" && bar.adjustment==="split");
-        const cachedFallback=cachedYahoo.filter((bar) => bar.ticker===ticker);
+        const lifecycle = getEtfLifecycle(ticker);
+        const closed = lifecycle && run.session_date > lifecycle.lastTradingDate;
+        const own=[...merged.values()].filter((bar) => bar.ticker===ticker && bar.sourceProvider==="alpaca" && bar.adjustment==="split"
+          && (!lifecycle || bar.date <= lifecycle.lastTradingDate));
+        const cachedFallback=cachedYahoo.filter((bar) => bar.ticker===ticker && (!lifecycle || bar.date <= lifecycle.lastTradingDate));
+        if (closed) errors[ticker]=`fund-liquidated:last-trading-session-${lifecycle.lastTradingDate}`;
         const validatedFallback=yahooWindowMatchesAlpaca(ticker,cachedFallback,own) ? cachedFallback : [];
         let bars=[...own.map(metricBar),...validatedFallback.map(metricBar)];
         let metric=computeEodTickerMetrics({ticker,targetSession:run.session_date,calendarDates:inputs.calendarDates,bars});
-        if ((metric.price===null || metric.change1d===null || metric.above200Sma===null) && yahooAttempts<200) {
+        if (!closed && (metric.price===null || metric.change1d===null || metric.above200Sma===null) && yahooAttempts<200) {
           yahooAttempts++;
           try {
             const fallback=await provider.yahoo(ticker,start,run.session_date,own);

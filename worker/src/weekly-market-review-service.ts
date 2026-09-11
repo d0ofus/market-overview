@@ -17,6 +17,7 @@ import {
   type MarketReportSourceAudit,
 } from "./market-report-common";
 import { listOverviewFocusItems } from "./overview-focus-service";
+import { loadAcceptedEodDailyReport, type MarketCommentaryAttemptSummary } from "./market-commentary-service";
 import { parseLocalTime, zonedParts } from "./refresh-timing";
 import type { Env, SnapshotResponse } from "./types";
 import {
@@ -64,6 +65,8 @@ export type WeeklyMarketReviewResponse = {
   status: "empty" | WeeklyMarketReviewStatus;
   warning: string | null;
   report: WeeklyMarketReviewReport | null;
+  expectedWeek?: { weekStart: string; weekEnd: string };
+  latestAttempt?: (MarketCommentaryAttemptSummary & { weekStart: string; weekEnd: string }) | null;
 };
 
 export type WeeklyMarketReviewGenerateResponse = WeeklyMarketReviewResponse & {
@@ -308,7 +311,7 @@ async function loadLatestReviewForWeek(env: Env, weekEnd: string): Promise<Weekl
     `SELECT ${WEEKLY_REPORT_SELECT}
      FROM weekly_market_reviews
      WHERE week_end = ?
-     ORDER BY CASE status WHEN 'ready' THEN 0 ELSE 1 END, CASE generation_provider WHEN 'hermes_gpt' THEN 0 ELSE 1 END, datetime(generated_at) DESC, datetime(created_at) DESC
+     ORDER BY datetime(generated_at) DESC, datetime(created_at) DESC, id DESC
      LIMIT 1`,
   )
     .bind(weekEnd)
@@ -388,21 +391,37 @@ async function storeWeeklyMarketReview(env: Env, input: StoredWeeklyMarketReview
 export async function loadLatestWeeklyMarketReview(env: Env, now = new Date()): Promise<WeeklyMarketReviewResponse> {
   const week = resolveWeeklyMarketReviewWeek(now);
   const preferred = await loadPreferredReadyReviewForWeek(env, week.weekEnd);
-  if (preferred) return { status: "ready", warning: preferred.provider === FACTUAL_REPORT_PROVIDER ? "Factual report; AI interpretation unavailable." : null, report: preferred };
-
   const latest = await loadLatestReviewForWeek(env, week.weekEnd);
-  if (latest?.status === "failed") {
+  const latestAttempt: WeeklyMarketReviewResponse["latestAttempt"] = latest ? {
+    status: latest.status,
+    attemptedAt: latest.generatedAt,
+    model: latest.model,
+    weekStart: latest.weekStart,
+    weekEnd: latest.weekEnd,
+    reasonCode: latest.status === "failed" ? "unknown" : null,
+    message: latest.status === "failed"
+      ? `Weekly report for ${week.weekStart} to ${week.weekEnd} failed: ${latest.error ?? "Generation did not complete."}` : null,
+  } : null;
+  const failure = latest?.status === "failed" ? latestAttempt?.message : null;
+  if (preferred) return {
+    status: "ready", report: preferred, expectedWeek: week, latestAttempt,
+    warning: [preferred.provider === FACTUAL_REPORT_PROVIDER ? "Factual report; AI interpretation unavailable." : null, failure]
+      .filter(Boolean).join(" ") || null,
+  };
+  const previous = await env.DB.prepare(`SELECT ${WEEKLY_REPORT_SELECT} FROM weekly_market_reviews
+    WHERE week_end < ? AND status='ready' ORDER BY week_end DESC,
+      CASE generation_provider WHEN 'hermes_gpt' THEN 0 ELSE 1 END,datetime(generated_at) DESC,datetime(created_at) DESC LIMIT 1`)
+    .bind(week.weekEnd).first<WeeklyMarketReviewRow>();
+  if (previous) {
+    const report = normalizeReportRow(previous);
     return {
-      status: "failed",
-      warning: latest.error ?? `Weekly market review generation failed for week ending ${week.weekEnd}.`,
-      report: latest,
+      status: latest?.status === "failed" ? "failed" : "empty", report, expectedWeek: week, latestAttempt,
+      warning: `${failure ?? `No successful weekly report is available for ${week.weekStart} to ${week.weekEnd}.`} Showing the separately dated successful report for ${report.weekStart} to ${report.weekEnd}.`,
     };
   }
-
   return {
-    status: "empty",
-    warning: `No weekly market review has been generated for the latest completed week (${week.weekStart} to ${week.weekEnd}).`,
-    report: null,
+    status: latest?.status === "failed" ? "failed" : "empty", report: latest, expectedWeek: week, latestAttempt,
+    warning: failure ?? `No weekly market review has been generated for the latest completed week (${week.weekStart} to ${week.weekEnd}).`,
   };
 }
 
@@ -472,12 +491,23 @@ export async function summarizeRecentDailyCommentary(env: Env, week: WeeklyMarke
   try {
     const rows = await env.DB.prepare(
       `SELECT session_date as sessionDate, created_at as generatedAt, market_session_label as marketSessionLabel, report_markdown as reportMarkdown
-       FROM market_commentary_reports
+       FROM market_commentary_reports report
        WHERE status = 'ready' AND session_date BETWEEN ? AND ?
-       ORDER BY session_date DESC, datetime(created_at) DESC
+         AND report.id=(SELECT newest.id FROM market_commentary_reports newest WHERE newest.status='ready'
+           AND newest.session_date=report.session_date ORDER BY newest.created_at DESC,newest.id DESC LIMIT 1)
+       ORDER BY session_date DESC, created_at DESC
        LIMIT 5`,
     ).bind(week.weekStart, week.weekEnd).all<{ sessionDate: string; generatedAt: string; marketSessionLabel: string; reportMarkdown: string }>();
-    const reports = rows.results ?? [];
+    let reports = rows.results ?? [];
+    if (env.EOD_RUNNER_MODE === "active" && env.EOD_READ_ENABLED === "true") {
+      const accepted: typeof reports = [];
+      for (const row of reports) {
+        const report = await loadAcceptedEodDailyReport(env, row.sessionDate);
+        if (report) accepted.push({ sessionDate: report.sessionDate, generatedAt: report.generatedAt,
+          marketSessionLabel: report.marketSessionLabel, reportMarkdown: report.reportMarkdown });
+      }
+      reports = accepted;
+    }
     if (reports.length === 0) {
       dataQuality.push({ metric: "Recent daily commentary", status: "unavailable", note: "No ready daily commentary reports were available." });
       return "Recent daily commentary: N/A.";

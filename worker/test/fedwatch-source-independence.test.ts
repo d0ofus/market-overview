@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../src/types";
+import { createSqliteD1 } from "./helpers/sqlite-d1";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 const sources = vi.hoisted(() => ({
   loadOfficialRateFacts: vi.fn(), refreshOfficialRateFacts: vi.fn(),
@@ -20,15 +23,18 @@ describe("independent official rate facts", () => {
     sources.refreshOfficialRateFacts.mockResolvedValue({ officialRates, officialRatesWarning: null });
     sources.loadOrRefreshLatestFomcCommentary.mockResolvedValue(officialCommentary);
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("Challenge required", { status: 403 })));
-    const run = vi.fn();
-    const env = { DB: { prepare: () => ({ first: async () => null, run }) } } as unknown as Env;
-
+    const storage=createSqliteD1();
+    storage.script(readFileSync(resolve("migrations/0016_fedwatch_snapshots.sql"),"utf8")+readFileSync(resolve("migrations/0078_provider_usage_budget.sql"),"utf8"));
+    const env = { DB:storage.db } as Env;
+    try {
     const response = await refreshFedWatchSnapshot(env);
 
     expect(response).toMatchObject({ status: "unavailable", data: null, officialRates, fomcCommentary: officialCommentary });
     expect(response.warning).toContain("403");
     expect(sources.refreshOfficialRateFacts).toHaveBeenCalledWith(env);
     expect(sources.loadOrRefreshLatestFomcCommentary).toHaveBeenCalledWith(env, 4);
-    expect(run).not.toHaveBeenCalled(); // No fabricated probability snapshot is persisted.
+    expect(await storage.db.prepare("SELECT COUNT(*) AS count FROM fedwatch_snapshots").first<number>("count")).toBe(0);
+    expect(response.probabilitySource).toMatchObject({error:"rateprobability-http-403",status:"cooldown"});
+    } finally {storage.dispose();}
   });
 });

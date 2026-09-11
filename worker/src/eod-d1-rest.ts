@@ -187,6 +187,18 @@ export function createEodD1Database(options: {
 const LEDGER_READS = 20;
 const LEDGER_WRITES = 12;
 const MEMBERSHIP_MARKERS=["delete","insert","pointer","active","supersede"] as const;
+const HOLDINGS_MARKERS=["replace-delete","replace-insert","symbols-insert"] as const;
+function holdingsQuerySize(query:EodSql,marker:typeof HOLDINGS_MARKERS[number]):number {
+  if (marker === "replace-delete") {
+    const count=query.params[2];
+    if (!Number.isSafeInteger(count) || Number(count)<0 || Number(count)>10_000 || query.params[0]!==query.params[1]) throw new Error("etf-holdings-invalid-batch");
+    return Number(count);
+  }
+  let rows:unknown;
+  try {rows=JSON.parse(String(query.params[marker === "replace-insert" ? 3 : 0]));} catch {throw new Error("etf-holdings-invalid-batch");}
+  if (!Array.isArray(rows) || rows.length>10_000) throw new Error("etf-holdings-invalid-batch");
+  return rows.length;
+}
 function membershipRows(query:EodSql,limit:number):number {
   let rows:unknown;
   try {rows=JSON.parse(String(query.params[1]));} catch {throw new Error("eod-universe-invalid-batch");}
@@ -194,6 +206,13 @@ function membershipRows(query:EodSql,limit:number):number {
   return rows.length;
 }
 function maximumReservationWrites(queries:readonly EodSql[]):number {
+  if (queries.length===3 && HOLDINGS_MARKERS.every((marker,index) => queries[index].sql.trimEnd().endsWith(`/* etf-holdings-${marker} */`))) {
+    // Only the reviewed atomic replacement can expand its envelope. Rows and
+    // payload remain bounded; daily/profile limits still apply to every credit.
+    HOLDINGS_MARKERS.forEach((marker,index)=>holdingsQuerySize(queries[index],marker));
+    if (queries[0].params[0]!==queries[1].params[0] || queries[1].params[3]!==queries[2].params[0]) throw new Error("etf-holdings-invalid-batch");
+    return 200_000;
+  }
   // Only the known five-statement atomic membership promotion may need a
   // larger envelope (cold bootstrap has two indexes plus its table rows).
   if (queries.length!==5 || !MEMBERSHIP_MARKERS.every((marker,index) =>
@@ -205,6 +224,7 @@ function maximumReservationWrites(queries:readonly EodSql[]):number {
 /** Fixed labels make live estimate failures diagnosable without logging SQL,
  * parameters, database IDs or provider error bodies. */
 function queryDiagnosticClass(query: EodSql): string {
+  for(const marker of HOLDINGS_MARKERS) if(query.sql.trimEnd().endsWith(`/* etf-holdings-${marker} */`)) return `etf-holdings-${marker}`;
   for (const label of ["stage", "prune-members", ...MEMBERSHIP_MARKERS.map((marker) => `promote-${marker}`)]) {
     if (query.sql.trimEnd().endsWith(`/* eod-universe-${label} */`)) return `universe-${label}`;
   }
@@ -225,6 +245,15 @@ export function estimateEodQueries(queries: readonly EodSql[]): { reads: number;
   let reads = 0;
   let writes = 0;
   for (const query of queries) {
+    const holdingsMarker=HOLDINGS_MARKERS.find(marker=>query.sql.trimEnd().endsWith(`/* etf-holdings-${marker} */`));
+    if (holdingsMarker) {
+      const count=holdingsQuerySize(query,holdingsMarker);
+      // Constituents: table+PK+unique index; symbols: table+seven indexes.
+      // Include JSON traversal, indexed duplicate checks and conservative slack.
+      reads+=count*(holdingsMarker==="symbols-insert" ? 12 : 6)+32;
+      writes+=count*(holdingsMarker==="symbols-insert" ? 10 : 4)+16;
+      continue;
+    }
     if(query.sql.trimEnd().endsWith("/* storage-archive-point-read */")) {
       // Repository-fixed SELECTs use either the complete pointer primary key
       // and one block join, or a block primary key. No date-range/table scan.

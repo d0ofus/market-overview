@@ -177,6 +177,8 @@ type EtfConstituent = {
   weight: number | null;
   change1d?: number;
   lastPrice?: number;
+  assetType?: string;
+  chartEligible?: boolean;
 };
 
 type NarrativeTickerSuggestion = {
@@ -915,12 +917,13 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
         name: row.name ?? row.ticker,
         metricLabel: "Weight",
         metricValue: row.weight != null ? `${row.weight.toFixed(2)}%` : "-",
+        chartUnavailableReason: row.chartEligible === false ? `${row.assetType === "crypto" ? "Crypto asset" : "Physical holding"}; an equity quote or chart does not apply.` : null,
         badges: (
           <>
-            <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${deltaPillCls(row.change1d ?? 0)}`}>
-              {signedPct(row.change1d ?? 0)}
+            <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${typeof row.change1d === "number" ? deltaPillCls(row.change1d) : "text-slate-400"}`}>
+              {typeof row.change1d === "number" ? signedPct(row.change1d) : "N/A"}
             </span>
-            <span className="text-slate-400">{formatFundPrice(row.lastPrice ?? 0)}</span>
+            <span className="text-slate-400">{typeof row.lastPrice === "number" ? formatFundPrice(row.lastPrice) : "N/A"}</span>
           </>
         ),
       })),
