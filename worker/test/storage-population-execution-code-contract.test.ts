@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { describe,expect,it } from "vitest";
@@ -8,14 +8,15 @@ const root=resolve(import.meta.dirname,"../..");
 const protectedPaths=["worker/src/eod-price-provider.ts","worker/src/eod-ticker-aliases.ts","worker/src/eod-runner.ts","worker/src/eod-price-repair.ts",
   "worker/src/market-history.ts","worker/src/market-storage-verification.ts","worker/src/eod-metrics.ts","worker/src/eod-bar-store.ts",
   "worker/src/provider-usage.ts","worker/src/eod-budget-profile.ts","worker/wrangler.toml","package-lock.json"];
+const historical=(path:string)=>execFileSync("git",["show",`bf65b3c86430ebf904cdc905fb9ccd2a0d492997:${path}`],{cwd:root,encoding:"utf8",windowsHide:true});
 const digest=(value:string)=>createHash("sha1").update(value).digest("hex");
 function fixture() {
-  const integrationSources=Object.fromEntries(Object.keys(STORAGE_POPULATION_INTEGRATION_HASHES).map(path=>[path,readFileSync(resolve(root,path),"utf8")]));
+  const integrationSources=Object.fromEntries(Object.keys(STORAGE_POPULATION_INTEGRATION_HASHES).map(path=>[path,historical(path)]));
   const before=protectedPaths.map(path=>({path,mode:"100644",blob:digest(path)}));
   const after=[...before,...Object.entries(integrationSources).map(([path,text])=>({path,mode:"100644",blob:digest(text)})),
     {path:"worker/tsconfig.runner.json",mode:"100644",blob:digest("runner")}];
   return {fromRevision:STORAGE_POPULATION_EXECUTION_PREVIOUS_REVISION,codeRevision:"f".repeat(40),before,after,integrationSources,
-    runnerConfig:readFileSync(resolve(root,"worker/tsconfig.runner.json"),"utf8")};
+    runnerConfig:historical("worker/tsconfig.runner.json")};
 }
 describe("reviewed population code-only transition",()=>{
   it("pins every reviewed integration while retaining all protected price/storage dependencies",()=>{

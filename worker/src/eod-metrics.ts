@@ -36,7 +36,31 @@ export type EodTickerMetricInput = EodMetricMember & {
   targetSession: string;
   calendarDates: readonly string[];
   bars: readonly EodMetricBar[];
+  explainHistory?: boolean;
 };
+
+export type EodHistoryFieldReason = "verified-recent-listing" | "missing-required-session";
+export const EOD_HISTORY_WINDOWS: Readonly<Record<string, number>> = {
+  price: 1, change1d: 2, change5d: 6, change1w: 6, change21d: 22, change3m: 64, change6m: 127,
+  pctFrom52wHigh: 252, above20Sma: 20, above50Sma: 50, above200Sma: 200,
+  sma5: 5, sma20: 20, sma50: 50, sma100: 100, sma200: 200,
+  high5: 5, high20: 20, high21: 21, high63: 63, high126: 126, high252: 252, low20: 20, reportedVolume: 1,
+};
+export const EOD_BREADTH_WINDOWS: Readonly<Record<string, number>> = {
+  advancers: 2, decliners: 2, unchanged: 2, advDecRatio: 2, medianReturn1D: 2, stocksGtPos4Pct: 2, stocksLtNeg4Pct: 2,
+  totalVolume: 1, medianReturn5D: 6, return63D: 64, stocksGtPos25Q: 64, stocksLtNeg25Q: 64,
+  pctAbove5MA: 5, pctAbove20MA: 20, pctAbove50MA: 50, pctAbove100MA: 100, pctAbove200MA: 200,
+  new5DHighs: 5, pctNew5DHighs: 5, new1MHighs: 21, pctNew1MHighs: 21,
+  new3MHighs: 63, pctNew3MHighs: 63, new6MHighs: 126, pctNew6MHighs: 126,
+  new52WHighs: 252, pctNew52WHighs: 252, new20DHighs: 20, pctNew20DHighs: 20, new20DLows: 20,
+};
+
+export function eodListingEligible(listingDate: string | null | undefined, calendar: readonly string[], sessions: number): boolean {
+  if (!listingDate || !ISO_DATE.test(listingDate)) return true;
+  const start = calendar.at(-sessions);
+  if (start) return listingDate <= start;
+  return calendar[0]! > listingDate || calendar.filter((date) => date >= listingDate).length >= sessions;
+}
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const positive = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value > 0;
@@ -119,6 +143,10 @@ function reportedVolume(input: EodTickerMetricInput): { value: number | null; co
 
 export function computeEodTickerMetrics(input: EodTickerMetricInput) {
   const calendar = calendarThrough(input.calendarDates, input.targetSession);
+  if (input.explainHistory && input.verifiedListingDate && input.bars.some((bar) =>
+    bar.ticker.toUpperCase() === input.ticker.toUpperCase() && validPriceBar(bar) && bar.sessionDate < input.verifiedListingDate!)) {
+    throw new Error("eod-listing-evidence-history-contradiction");
+  }
   const selected = chooseSeries(input, calendar);
   const price = selected.series.get(input.targetSession)?.close ?? null;
   const window = (count: number) => completeWindow(calendar, selected.series, count)?.map((bar) => bar.close) ?? null;
@@ -165,6 +193,15 @@ export function computeEodTickerMetrics(input: EodTickerMetricInput) {
     if (value !== null) fieldSources[key] = key === "reportedVolume" ? "alpaca:sip-reported-volume" : `${selected.provider}:split-daily-bars`;
   }
   const sparklineDates = calendar.slice(-90);
+  const fieldReasons: Record<string, EodHistoryFieldReason> = {};
+  if (input.explainHistory) {
+    for (const [key, value] of Object.entries(values)) {
+      if (value !== null) continue;
+      const sessions = key === "ytd" ? (priorYearIndex >= 0 ? calendar.length - priorYearIndex : calendar.length + 1) : EOD_HISTORY_WINDOWS[key];
+      fieldReasons[key] = sessions && !eodListingEligible(input.verifiedListingDate, calendar, sessions)
+        ? "verified-recent-listing" : "missing-required-session";
+    }
+  }
   return {
     ticker: input.ticker.toUpperCase(), sessionDate: input.targetSession,
     methodologyVersion: EOD_METRICS_VERSION, sourceProvider: selected.provider,
@@ -174,6 +211,7 @@ export function computeEodTickerMetrics(input: EodTickerMetricInput) {
     verifiedListingDate: input.verifiedListingDate ?? null,
     ...values, fieldSources, sparklineDates,
     sparkline: sparklineDates.map((date) => selected.series.get(date)?.close ?? null),
+    ...(input.explainHistory ? { fieldReasons } : {}),
   };
 }
 
@@ -230,14 +268,7 @@ export function computeEodBreadthMetrics(input: {
       calendarDates: calendar, bars: barsByTicker.get(member.ticker.toUpperCase()) ?? [] });
   });
   const metricCoverage: Record<string, EodMetricCoverage> = {};
-  const eligibleFor = (row: EodTickerMetrics, sessions: number): boolean => {
-    if (!row.verifiedListingDate || !ISO_DATE.test(row.verifiedListingDate)) return true;
-    const start = calendar.at(-sessions);
-    if (start) return row.verifiedListingDate <= start;
-    // A short calendar cannot prove pre-listing ineligibility unless it covers
-    // the verified listing date; otherwise the population remains missing.
-    return calendar[0]! > row.verifiedListingDate || calendar.filter((date) => date >= row.verifiedListingDate!).length >= sessions;
-  };
+  const eligibleFor = (row: EodTickerMetrics, sessions: number): boolean => eodListingEligible(row.verifiedListingDate, calendar, sessions);
   const qualified = (key: string, sessions: number, value: (row: EodTickerMetrics) => number | null) => {
     const population = rows.filter((row) => eligibleFor(row, sessions));
     const observed = population.filter((row) => value(row) !== null);

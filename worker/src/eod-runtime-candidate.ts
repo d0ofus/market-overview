@@ -78,7 +78,7 @@ export async function runtimeCandidateIdentity(input: {
 }
 
 export function assertCandidateMigrationState(run: StorageMigrationRun, identity: StorageMigrationIdentity, now = new Date()): void {
-  if (run.status !== "awaiting-evidence" || run.stage !== "storage-final-acceptance-required" || run.freeze_authorized !== 1
+  if (run.status !== "awaiting-evidence" || run.stage !== "bootstrap" || run.error_code !== "storage-final-acceptance-required" || run.freeze_authorized !== 1
     || !run.source_schema_hash || run.source_revision === null || (run.lease_until && run.lease_until > now.toISOString())
     || run.id !== identity.id || storageExecutionRevision(run) !== identity.codeRevision || run.source_database_id !== identity.sourceDatabaseId
     || run.target_database_id !== identity.targetDatabaseId || run.history_database_id !== identity.historyDatabaseId

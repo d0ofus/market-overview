@@ -10,6 +10,7 @@
   "include": [
     "src",
     "scripts/eod-runner.ts",
+    "scripts/register-eod-listing-evidence.ts",
     "scripts/eod-monitor-runner.ts",
     "scripts/market-storage-runner.ts",
     "scripts/market-storage-snapshot.ts",
@@ -30,6 +31,7 @@
     "scripts/continue-storage-vix-quarantine.ts",
     "scripts/continue-storage-population-execution.ts",
     "scripts/eod-population-expansion-operator.ts",
-    "scripts/expand-storage-population.ts"
+    "scripts/expand-storage-population.ts",
+    "scripts/continue-storage-listing-execution.ts"
   ]
 }

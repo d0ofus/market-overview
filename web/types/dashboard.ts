@@ -30,6 +30,8 @@ export type OverviewCurrentData = {
   performanceSource: string | null;
   smaSource: string | null;
   fieldSources: Record<string, string>;
+  fieldReasons?: Record<string, "verified-recent-listing" | "missing-required-session">;
+  listingEvidenceHash?: string;
   providerStatuses: Record<string, {
     status: OverviewCurrentProviderStatus;
     reason: string;

@@ -2,7 +2,8 @@ import { z } from "zod";
 import { buildEodCatalogRow, EOD_CATALOG_METHODOLOGY_VERSION, EOD_CATALOG_SCOPE, loadEodCatalogRows } from "./eod-catalog-service";
 import { EOD_PUBLICATION_SCOPES } from "./eod-coordinator";
 import { MARKET_HISTORY_REQUIRED_CONSUMERS, MARKET_HISTORY_READER_CONTRACT_VERSION } from "./eod-history-maintenance";
-import { computeEodTickerMetrics, EOD_METRICS_VERSION, type EodMetricBar } from "./eod-metrics";
+import { computeEodTickerMetrics, EOD_METRICS_VERSION, EOD_BREADTH_WINDOWS, eodListingEligible, type EodMetricBar } from "./eod-metrics";
+import { listingDateFor, validateFrozenListingEvidence, type FrozenListingEvidence } from "./eod-listing-evidence";
 import { decodeEodPayload, type EodStoredPayload } from "./eod-publication-codec";
 import { eodHash } from "./eod-publication-service";
 import { EOD_YAHOO_ARCHIVE_LAYOUT, storageFallbackModelValid } from "./eod-storage-layout";
@@ -224,6 +225,30 @@ export type StoragePublicationEvidence = {
   membershipHash: string; catalogHash: string; evidenceHash: string;
 };
 
+/** Listing exclusions require the immutable frozen evidence; a publication's
+ * asserted denominator cannot grant its own exception to the coverage gate. */
+export function validateListingBreadthCoverage(input: { universe: string; members: string[]; calendar: string[];
+  evidence: FrozenListingEvidence; metrics: Record<string, unknown>; provenance: Record<string, unknown> }): void {
+  const threshold = input.universe === "sp500-core" ? 98 : 95;
+  if (input.provenance.listingEvidenceHash !== input.evidence.evidenceHash) fail("listing-publication-evidence-mismatch");
+  const all = object(input.metrics.metricCoverage);
+  for (const [key, sessions] of Object.entries(EOD_BREADTH_WINDOWS)) {
+    const expected = input.members.filter((ticker) => eodListingEligible(listingDateFor(input.evidence,ticker),input.calendar,sessions)).length;
+    const coverage = object(all[key]), observed = coverage.eligibleCount;
+    if (coverage.totalUniverseMembers !== input.members.length || coverage.eligiblePopulation !== expected
+      || coverage.structurallyIneligibleCount !== input.members.length - expected
+      || typeof observed !== "number" || !count(observed) || observed > expected
+      || coverage.missingCount !== expected - observed || coverage.thresholdPct !== threshold) fail("listing-coverage-denominator-invalid");
+    const fraction = expected ? observed / expected * 100 : 0;
+    const ready = expected > 0 && fraction >= threshold;
+    if (typeof coverage.coveragePct !== "number" || Math.abs(coverage.coveragePct - fraction) > 1e-8
+      || coverage.status !== (ready ? "ready" : "suppressed")
+      || (!ready && key in input.metrics && input.metrics[key] !== null)) fail("listing-coverage-gate-invalid");
+    if (key === "advancers" && (!ready || input.metrics.memberCount !== observed
+      || input.metrics.dataCoveragePct !== coverage.coveragePct)) fail("accepted-breadth-coverage");
+  }
+}
+
 /** Seven already-verified stored rows for an offline physical growth fixture.
  * No financial observation or publication is inserted by this collection. */
 export async function collectStoragePublicationGrowthSamples(env: Env, evidence: StoragePublicationEvidence, sourceSchemaHash: string): Promise<{
@@ -258,6 +283,8 @@ export async function verifyStorageAcceptedPublications(input: {
   const frozen = object(JSON.parse(run.inputs)), progress = object(JSON.parse(run.progress));
   if (await eodHash(population(stringList(frozen.tickers))) !== tickerHash || progress.symbols !== tickers.length
     || frozen.methodologyVersion !== EOD_METRICS_VERSION) fail("publication-population-mismatch");
+  const listingEvidence = Object.prototype.hasOwnProperty.call(frozen,"listingEvidence")
+    ? await validateFrozenListingEvidence(frozen.listingEvidence,tickers,input.expectedSession,ops) : undefined;
   const clock = async () => db.prepare("SELECT revision FROM eod_input_clock WHERE id='default'").first<number>("revision");
   const before = await clock();
   if (!count(run.inputClock) || before !== run.inputClock) fail("publication-inputs-changed");
@@ -288,7 +315,9 @@ export async function verifyStorageAcceptedPublications(input: {
       if (!members.length || new Set(members).size !== members.length || members.some((ticker) => !tickers.includes(ticker))
         || payloadMembership.versionId !== member?.versionId || payload.publishable !== true
         || total !== members.length || typeof observed !== "number" || !count(observed) || observed > members.length
-        || observed / members.length < (universe === "sp500-core" ? 0.98 : 0.95)) fail("accepted-breadth-coverage");
+        || (!listingEvidence && observed / members.length < (universe === "sp500-core" ? 0.98 : 0.95))) fail("accepted-breadth-coverage");
+      if (listingEvidence) validateListingBreadthCoverage({ universe, members, calendar:stringList(frozen.calendarDates),
+        evidence:listingEvidence, metrics, provenance:object(payload.provenance) });
     } else if (!catalog && (payload.status !== "ready" || typeof payload.freshnessCurrentCount !== "number" || payload.freshnessCurrentCount < 1)) {
       fail("accepted-overview-unusable");
     }

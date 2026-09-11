@@ -4,7 +4,7 @@ import { ensureMarketCalendarCoverage } from "./market-calendar-cache";
 import { loadMarketHistory, archiveMarketHistoryBars, marketHistoryBarsMateriallyEqual } from "./market-history";
 import { EodPriceProvider, selectYahooEodSessions, yahooWindowMatchesAlpaca, type EodPriceBar } from "./eod-price-provider";
 import { reviewedEodTickerAlias } from "./eod-ticker-aliases";
-import { computeEodTickerMetrics, computeEodBreadthMetrics, EOD_METRICS_VERSION, type EodMetricBar, type EodTickerMetrics } from "./eod-metrics";
+import { computeEodTickerMetrics, computeEodBreadthMetrics, EOD_METRICS_VERSION, eodListingEligible, type EodMetricBar, type EodTickerMetrics } from "./eod-metrics";
 import { eodHash, storeEodPublication } from "./eod-publication-service";
 import { EOD_PUBLICATION_SCOPES,eodRunHistorySelection,type EodRun } from "./eod-coordinator";
 import type { Env, DashboardConfigPayload, SnapshotReadyResponse } from "./types";
@@ -19,9 +19,10 @@ import { encodeEodPayload,decodeEodPayload } from "./eod-publication-codec";
 import { buildEodCatalogRow,encodeEodCatalogPayload,EOD_CATALOG_SCOPE,EOD_CATALOG_METHODOLOGY_VERSION,type EodCatalogRow } from "./eod-catalog-service";
 import { assessEodMembershipEvidence } from "./eod-membership-evidence";
 import { getEtfLifecycle } from "./etf-holdings-quality";
+import { listingDateFor, loadFrozenListingEvidence, validateFrozenListingEvidence, type FrozenListingEvidence } from "./eod-listing-evidence";
 
 type Membership = {universeId:string;versionId:string;source:string;sourceType:string|null;sourceUrl:string|null;sourceAsOfDate:string|null;verifiedAt:string|null;members:string[]};
-export type FrozenInputs = {config:DashboardConfigPayload;memberships:Membership[];tickers:string[];calendarDates:string[];methodologyVersion:string};
+export type FrozenInputs = {config:DashboardConfigPayload;memberships:Membership[];tickers:string[];calendarDates:string[];methodologyVersion:string;listingEvidence?:FrozenListingEvidence};
 type FeatureCheckpoint = {features:Array<[string,EodTickerMetrics]>;catalogRows:EodCatalogRow[];revisions:Array<{feed:string;ticker:string;revision:number}>;errors:Record<string,string>};
 const metricBar = (bar:EodPriceBar):EodMetricBar => ({
   ticker:bar.ticker,sessionDate:bar.date,close:bar.c,open:bar.o,high:bar.h,low:bar.l,
@@ -49,7 +50,10 @@ export async function loadEodInputs(env:Env,session:string):Promise<FrozenInputs
   const overview=config.sections.flatMap((section) => section.groups.flatMap((group) => group.items.filter((item) => item.enabled).map((item) => item.ticker)));
   const orderedMemberships=[...memberships].sort((a,b) => Number(b.universeId==="sp500-core")-Number(a.universeId==="sp500-core"));
   const tickers=Array.from(new Set([...overview,"SPY",...orderedMemberships.flatMap((row) => row.members),...catalog.results.map((row) => row.ticker)]));
-  return {config,memberships,tickers,calendarDates,methodologyVersion:EOD_METRICS_VERSION};
+  const listingEvidence=await loadFrozenListingEvidence(env,tickers,session,calendarDates);
+  const inputs={config,memberships,tickers,calendarDates,methodologyVersion:EOD_METRICS_VERSION,...(listingEvidence ? {listingEvidence} : {})};
+  if (listingEvidence && new TextEncoder().encode(JSON.stringify(inputs)).byteLength > 1_800_000) throw new Error("eod-listing-evidence-input-capacity-exceeded");
+  return inputs;
 }
 
 export async function inputRevisions(env:Env,tickers:string[]) {
@@ -71,10 +75,12 @@ export function overviewPayload(inputs: FrozenInputs, features: Map<string, EodT
     const metric = features.get(ticker);
     const lifecycle = getEtfLifecycle(ticker);
     if (lifecycle && session > lifecycle.lastTradingDate && metric?.price != null) {
-      return computeEodTickerMetrics({ ticker, targetSession: session, calendarDates: inputs.calendarDates, bars: [] });
+      return computeEodTickerMetrics({ ticker, targetSession: session, calendarDates: inputs.calendarDates, bars: [],
+        ...(inputs.listingEvidence ? {explainHistory:true,verifiedListingDate:listingDateFor(inputs.listingEvidence,ticker)} : {}) });
     }
     return metric?.sessionDate === session && metric.methodologyVersion === inputs.methodologyVersion
-      ? metric : computeEodTickerMetrics({ ticker, targetSession: session, calendarDates: inputs.calendarDates, bars: [] });
+      ? metric : computeEodTickerMetrics({ ticker, targetSession: session, calendarDates: inputs.calendarDates, bars: [],
+        ...(inputs.listingEvidence ? {explainHistory:true,verifiedListingDate:listingDateFor(inputs.listingEvidence,ticker)} : {}) });
   };
   const available = uniqueTickers.filter((ticker) => metricFor(ticker).price !== null).length;
   if (available === 0) throw new Error("overview-no-verified-prices");
@@ -120,6 +126,12 @@ export function overviewPayload(inputs: FrozenInputs, features: Map<string, EodT
           const closed = lifecycle && session > lifecycle.lastTradingDate;
           const alias = reviewedEodTickerAlias(item.ticker, session);
           const identityDetail = alias ? ` ${item.ticker} is the retained historical alias; this fund trades as ${alias.currentSymbol} from ${alias.effectiveDate}. Issuer: ${alias.sourceUrl}` : "";
+          const preListingFields=Object.values(m.fieldReasons ?? {}).filter(value=>value==="verified-recent-listing").length;
+          const missingHistoryFields=Object.values(m.fieldReasons ?? {}).filter(value=>value==="missing-required-session").length;
+          const listingSummary=inputs.listingEvidence ? (m.verifiedListingDate ? ` Verified first trading session ${m.verifiedListingDate}.`
+            : " No verified listing date; missing history remains missing coverage.")
+            + (preListingFields ? ` ${preListingFields} unavailable fields require history before listing.` : "")
+            + (missingHistoryFields ? ` ${missingHistoryFields} fields lack required session observations.` : "") : "";
           const reason = (hasPrice ? `Verified ${session} EOD close from ${source}; each populated metric requires its exact session window.`
             : closed ? `No current price: fund liquidated ${lifecycle.liquidationDate}; last trading session ${lifecycle.lastTradingDate}. Source result: ${lifecycle.sourceUrl}`
             : `No verified EOD price for ${session}; no earlier quote is substituted.${failure ? ` Source result: ${failure}.` : ""}`) + identityDetail;
@@ -136,14 +148,15 @@ export function overviewPayload(inputs: FrozenInputs, features: Map<string, EodT
               sessionDate: session, status: hasPrice ? "fresh" as const : "unavailable" as const, reason,
               quoteSource: hasPrice ? source : null, performanceSource: m.change1d !== null ? source : null,
               smaSource: [m.above20Sma, m.above50Sma, m.above200Sma].some((value) => value !== null) ? source : null,
-              fieldSources: { ...m.fieldSources }, providerStatuses: {}, fetchedAt: m.collectedAt,
+              fieldSources: { ...m.fieldSources }, ...(inputs.listingEvidence ? {fieldReasons:m.fieldReasons ?? {},listingEvidenceHash:inputs.listingEvidence.evidenceHash} : {}), providerStatuses: {}, fetchedAt: m.collectedAt,
               tradingViewSymbol: null, tradingViewTime: null, tradingViewLastBarUpdateTime: null, tradingViewLastPriceUpdateTime: null,
               tradingViewUpdateTime: null, tradingViewUpdateMode: null, tradingViewCurrentSession: null,
             },
             historyData: {
               sessionDate: session, status: hasPrice ? "fresh" as const : "unavailable" as const, reason,
               barDate: hasPrice ? session : null, source, seriesThroughDate: throughDate, seriesStatus, seriesSource: source,
-              seriesReason: `${points.length}/${m.sparkline.length} plotted sessions; missing sessions remain gaps. Relative strength uses date-aligned ratios to SPY, rebased to the first jointly observed date.`,
+              seriesReason: `${points.length}/${m.sparkline.length} plotted sessions; missing sessions remain gaps. Relative strength uses date-aligned ratios to SPY, rebased to the first jointly observed date.`
+                + listingSummary,
             },
             rankKey: group.rankingWindowDefault === "YTD" ? m.ytd : group.rankingWindowDefault === "52W" ? m.pctFrom52wHigh : group.rankingWindowDefault === "1D" ? m.change1d : m.change5d,
             holdings: item.holdings,
@@ -261,10 +274,14 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
         }
       }
     }
+    if (Object.prototype.hasOwnProperty.call(inputs,"listingEvidence")) {
+      await validateFrozenListingEvidence(inputs.listingEvidence,inputs.tickers,run.session_date,env.OPS_DB);
+    }
     await runDb.prepare("UPDATE eod_runs SET input_json=? WHERE id=? AND lease_token=?").bind(JSON.stringify(inputs),runId,lease).run();
     // Membership verification and retrieval timestamps do not change a ticker's
     // calculations. Revision manifests still invalidate corrected price inputs.
-    const inputHash=await eodHash([inputs.methodologyVersion,inputs.calendarDates]);
+    const inputHash=await eodHash(inputs.listingEvidence ? [inputs.methodologyVersion,inputs.calendarDates,inputs.listingEvidence.evidenceHash]
+      : [inputs.methodologyVersion,inputs.calendarDates]);
     if (run.purpose==="backfill" || run.purpose==="maintenance") {
       const selection=eodRunHistorySelection(run);
       const result=await runEodHistoryWork(env,{runId,sessionDate:run.session_date,
@@ -322,15 +339,17 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
         if (!membershipEvidence.publishable) { errors[membership.universeId]=membershipEvidence.reason!; continue; }
         const age=membershipEvidence.ageSessions!;
         const result=computeEodBreadthMetrics({universeId:membership.universeId,targetSession:run.session_date,
-          calendarDates:inputs.calendarDates,members:membership.members.map((ticker) => ({ticker})),bars:[],features});
+          calendarDates:inputs.calendarDates,members:membership.members.map((ticker) => ({ticker,
+            ...(inputs.listingEvidence ? {verifiedListingDate:listingDateFor(inputs.listingEvidence,ticker)} : {})})),bars:[],features});
         if (!result.publishable) { errors[membership.universeId]="breadth-coverage-below-threshold"; continue; }
         const used=revisions.filter((row) => membership.members.includes(row.ticker));
         const {volumeCollection:_collection,...metricIdentity}=result;
-        const scopeHash=await eodHash([membership,metricIdentity,used]);
+        const scopeHash=await eodHash(inputs.listingEvidence ? [membership,metricIdentity,used,inputs.listingEvidence.evidenceHash] : [membership,metricIdentity,used]);
         const {members:memberTickers,...membershipMetadata}=membership;
         const payload={...result,asOfDate:run.session_date,universeId:membership.universeId,generatedAt:new Date().toISOString(),
           membership:{...membershipMetadata,memberCount:memberTickers.length,degraded:age>0},dataSource:"Alpaca SIP / validated Yahoo fallback",
-          provenance:{methodologyVersion:EOD_METRICS_VERSION,inputHash:scopeHash,membershipVersion:membership.versionId}};
+          provenance:{methodologyVersion:EOD_METRICS_VERSION,inputHash:scopeHash,membershipVersion:membership.versionId,
+            ...(inputs.listingEvidence ? {listingEvidenceHash:inputs.listingEvidence.evidenceHash} : {})}};
         published.push(await storeEodPublication(env,{scope,sessionDate:run.session_date,inputHash:scopeHash,
           methodologyVersion:EOD_METRICS_VERSION,payload,promote:run.mode==="active",revisions:used}));
         publishedScopes.add(scope);
@@ -357,8 +376,10 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
           && tickers.every((ticker) => cached.catalogRows.some((row) => row.ticker===ticker))
           && cached.features.length===tickers.length && tickers.every((ticker) => cached.features.some(([symbol]) => symbol===ticker))
           && tickers.every((ticker) => { const lifecycle=getEtfLifecycle(ticker); return !lifecycle || run.session_date<=lifecycle.lastTradingDate; })
-          && cached.features.every(([,feature]) => feature.price!==null && feature.change1d!==null
-            && (feature.above200Sma!==null || resumePlannedSlice))) {
+          && cached.features.every(([ticker,feature]) => feature.price!==null && (inputs.listingEvidence
+            ? (feature.change1d!==null || !eodListingEligible(listingDateFor(inputs.listingEvidence,ticker),inputs.calendarDates,2))
+              && (feature.above200Sma!==null || resumePlannedSlice || !eodListingEligible(listingDateFor(inputs.listingEvidence,ticker),inputs.calendarDates,200))
+            : feature.change1d!==null && (feature.above200Sma!==null || resumePlannedSlice)))) {
           cached.features.forEach(([ticker,feature]) => features.set(ticker,feature));
           cached.catalogRows.forEach((row) => catalogRows.set(row.ticker,row));
           revisions.push(...cached.revisions); Object.assign(errors,cached.errors);
@@ -393,7 +414,8 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
       for (const date of inputs.calendarDates.slice(-260)) {
         if (tickers.some((ticker) => {
           const lifecycle = getEtfLifecycle(ticker);
-          return (!lifecycle || date <= lifecycle.lastTradingDate) && !existingKeys.has(`${ticker}:${date}`);
+          const listing=listingDateFor(inputs.listingEvidence,ticker);
+          return (!lifecycle || date <= lifecycle.lastTradingDate) && (!listing || date>=listing) && !existingKeys.has(`${ticker}:${date}`);
         })) {
           // A newly closed session is normally absent. It must not shorten the
           // five-session correction overlap; older gaps may only extend it.
@@ -486,8 +508,24 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
         if (closed) errors[ticker]=`fund-liquidated:last-trading-session-${lifecycle.lastTradingDate}`;
         const validatedFallback=yahooWindowMatchesAlpaca(ticker,cachedFallback,own) ? cachedFallback : [];
         let bars=[...own.map(metricBar),...validatedFallback.map(metricBar)];
-        let metric=computeEodTickerMetrics({ticker,targetSession:run.session_date,calendarDates:inputs.calendarDates,bars});
-        if (!closed && (metric.price===null || metric.change1d===null || metric.above200Sma===null) && yahooAttempts<200) {
+        let listingQuarantined=false;
+        const calculate=()=>{
+          const input={ticker,targetSession:run.session_date,calendarDates:inputs.calendarDates,bars,
+            ...(inputs.listingEvidence ? {explainHistory:true,verifiedListingDate:listingDateFor(inputs.listingEvidence,ticker)} : {})};
+          try {return computeEodTickerMetrics(input);} catch(error) {
+            if(!inputs.listingEvidence || !(error instanceof Error) || error.message!=="eod-listing-evidence-history-contradiction") throw error;
+            // Preserve the conflicting stored observations for investigation;
+            // quarantine this security's prices without stopping other scopes.
+            listingQuarantined=true;errors[ticker]=error.message;
+            return computeEodTickerMetrics({...input,bars:[]});
+          }
+        };
+        let metric=calculate();
+        const needsFallback=inputs.listingEvidence ? metric.price===null
+          || (metric.change1d===null && eodListingEligible(listingDateFor(inputs.listingEvidence,ticker),inputs.calendarDates,2))
+          || (metric.above200Sma===null && eodListingEligible(listingDateFor(inputs.listingEvidence,ticker),inputs.calendarDates,200))
+          : metric.price===null || metric.change1d===null || metric.above200Sma===null;
+        if (!closed && !listingQuarantined && needsFallback && yahooAttempts<200) {
           yahooAttempts++;
           try {
             const fetchedFallback=await provider.yahoo(ticker,start,run.session_date,own);
@@ -500,7 +538,7 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
               ownRevisionChanges.push(...archived.revisionChanges);
             }
             bars=[...bars.filter((bar) => bar.sourceProvider!=="yahoo"),...fallback.map(metricBar)];
-            metric=computeEodTickerMetrics({ticker,targetSession:run.session_date,calendarDates:inputs.calendarDates,bars});
+            metric=calculate();
           } catch(error) {
             if (error instanceof EodBatchInterruptedError) throw error;
             const message=error instanceof Error ? error.message : "fallback-unavailable";

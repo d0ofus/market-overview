@@ -6,7 +6,10 @@ import { resolve } from "node:path";
 import { assertCandidateMigrationState, privateRuntimeAdminSecret, assertRuntimeCandidateCredentialBinding, prepareRuntimeCandidateConfig, runCandidateProbes, runtimeCandidateIdentity,
   runtimeCandidatePublicationHash, runtimeCandidateEvidenceFilename, runtimeCollectorOptions, runtimeCollectorCacheMatches,
   assertRuntimeCandidateWindow, runtimeCandidateRequiresWindow, type CandidateProbeState } from "../src/eod-runtime-candidate";
-import type { StorageMigrationIdentity, StorageMigrationRun } from "../src/market-storage-control";
+import { authorizeStorageMigrationFreeze, claimStorageMigration, createStorageMigration, loadStorageMigration,
+  pauseStorageMigration, progressStorageMigration, recordStorageSourceCapture, resumeStorageMigration,
+  type StorageMigrationIdentity, type StorageMigrationRun } from "../src/market-storage-control";
+import { createSqliteD1 } from "./helpers/sqlite-d1";
 import type { StoragePublicationEvidence } from "../src/market-storage-acceptance";
 import { resolveEodBudgetProfile } from "../src/eod-budget-profile";
 const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -143,13 +146,43 @@ describe("protected runtime candidate configuration", () => {
   });
   it("requires final private bootstrap state and refuses active, failed, leased or mismatched migrations", () => {
     const run = { id: migration.id, source_database_id: uuid(1), target_database_id: uuid(2), history_database_id: uuid(3), session_date: migration.sessionDate,
-      code_revision: migration.codeRevision, status: "awaiting-evidence", stage: "storage-final-acceptance-required", freeze_authorized: 1,
+      code_revision: migration.codeRevision, status: "awaiting-evidence", stage: "bootstrap", error_code: "storage-final-acceptance-required", freeze_authorized: 1,
       source_schema_hash: "b".repeat(64), source_revision: 1, lease_until: null } as StorageMigrationRun;
     expect(() => assertCandidateMigrationState(run, migration, now)).not.toThrow();
-    for (const patch of [{ status: "running" }, { stage: "bootstrap" }, { freeze_authorized: 0 }, { lease_until: probeUntil }, { target_database_id: uuid(99) }]) {
+    for (const patch of [{ status: "running" }, { stage: "storage-final-acceptance-required" }, { error_code: null },
+      { error_code: "storage-bootstrap-incomplete" }, { error_code: "storage-population-expansion-required" },
+      { freeze_authorized: 0 }, { lease_until: probeUntil }, { target_database_id: uuid(99) }]) {
       expect(() => assertCandidateMigrationState({ ...run, ...patch } as StorageMigrationRun, migration, now)).toThrow("not-ready");
     }
   });
+  it("accepts the actual persisted bootstrap pause and rejects a different pause without rewriting its stage", async () => {
+    const ops = createSqliteD1();
+    try {
+      ops.migrate("ops-migrations");
+      await createStorageMigration(ops.db, migration, now);
+      await authorizeStorageMigrationFreeze(ops.db, migration.id, { sourceDatabaseId: migration.sourceDatabaseId,
+        codeRevision: migration.codeRevision, schemaHash: "b".repeat(64), evidenceHash: "c".repeat(64) }, now);
+      let owner = (await claimStorageMigration(ops.db, migration.id, { now }))!;
+      await recordStorageSourceCapture(ops.db, migration.id, owner.leaseToken, { schemaHash: "b".repeat(64), revision: 1 }, now);
+      await progressStorageMigration(ops.db, migration.id, owner.leaseToken, "bootstrap", { sessionDate: migration.sessionDate }, now);
+      expect(() => assertCandidateMigrationState(owner.run, migration, now)).toThrow("not-ready");
+      await pauseStorageMigration(ops.db, migration.id, owner.leaseToken, "storage-population-expansion-required", {}, now);
+      const wrong = (await loadStorageMigration(ops.db, migration.id))!;
+      expect(wrong).toMatchObject({ status: "awaiting-evidence", stage: "bootstrap", error_code: "storage-population-expansion-required" });
+      expect(() => assertCandidateMigrationState(wrong, migration, now)).toThrow("not-ready");
+      await resumeStorageMigration(ops.db, migration.id, migration.codeRevision, now);
+      owner = (await claimStorageMigration(ops.db, migration.id, { now }))!;
+      // These are the same two control calls used by the real pipeline after
+      // it verifies the completed owner and records bootstrap:complete.
+      await progressStorageMigration(ops.db, migration.id, owner.leaseToken, "bootstrap", { sessionDate: migration.sessionDate }, now);
+      await pauseStorageMigration(ops.db, migration.id, owner.leaseToken, "storage-final-acceptance-required", {}, now);
+      const ready = (await loadStorageMigration(ops.db, migration.id))!;
+      expect(ready).toMatchObject({ status: "awaiting-evidence", stage: "bootstrap", error_code: "storage-final-acceptance-required",
+        lease_token: null, lease_until: null, next_attempt_at: null });
+      expect(() => assertCandidateMigrationState(ready, migration, now)).not.toThrow();
+      expect(await loadStorageMigration(ops.db, migration.id)).toEqual(ready);
+    } finally { ops.dispose(); }
+  }, 30_000);
 });
 
 describe("candidate HTTP protocol", () => {
