@@ -61,34 +61,59 @@ async function loadRecord(ops: D1Database, key: string): Promise<RecordEvidence 
   const parsed = recordSchema.safeParse(value);
   if (!parsed.success) fail("run-revocation-record-invalid");
   const { evidenceHash, ...unsigned } = parsed.data;
-  if (await storageHash(unsigned) !== evidenceHash) fail("run-revocation-record-invalid");
+  if (await storageHash(unsigned) !== evidenceHash || storageGitHubRevocationKey(unsigned.snapshot.runId) !== key
+    || unsigned.fromRevision !== unsigned.snapshot.headRevision || unsigned.fromRevision === unsigned.approvalRevision
+    || Date.parse(unsigned.firstCheckedAt) > Date.parse(unsigned.secondCheckedAt)) fail("run-revocation-record-invalid");
   return parsed.data;
 }
 
-/** All noncompleted jobs still block. The only exception is an explicitly
- * named queued attempt whose exact metadata/jobs remain unchanged on both
- * sides of the complete active-state inventory, and whose denial is durable. */
+/** All noncompleted jobs still block except an explicitly revoked exact run.
+ * Later approvals may reuse its immutable denial only after proving that the
+ * current executor enforces that denial and rechecking the original snapshot. */
 export function createStorageWorkflowQuiescence(input: {
   ops: D1Database; repository: string; migration: StorageMigrationIdentity; fromRevision: string; codeRevision: string;
   revokeRunId?: string; readGitHub: GitHubReader; now?: () => Date;
+  assertRevokedRunClaimFence?: () => Promise<void>;
 }): () => Promise<void> {
   if (!/^[\w.-]+\/[\w.-]+$/.test(input.repository) || !SHA.test(input.fromRevision) || !SHA.test(input.codeRevision)
     || (input.revokeRunId !== undefined && !RUN_ID.test(input.revokeRunId))) fail("run-revocation-identity-invalid");
   const migration = recordSchema.shape.operatorMigration.parse(input.migration);
   const root = `repos/${input.repository}/actions`, now = input.now ?? (() => new Date());
-  const inspect = async (): Promise<Snapshot | null> => {
-    if (input.revokeRunId === undefined) return null;
+  const inspect = async (runId: string, fromRevision: string): Promise<Snapshot> => {
     const workflow = await input.readGitHub(`${root}/workflows/eod-storage-migration.yml`);
-    const run = await input.readGitHub(`${root}/runs/${input.revokeRunId}`);
+    const run = await input.readGitHub(`${root}/runs/${runId}`);
     // filter=all and attempt=1 prevent an older allocation from being hidden by
     // the jobs endpoint's default latest-attempt filtering.
-    const jobs = await input.readGitHub(`${root}/runs/${input.revokeRunId}/jobs?filter=all&per_page=1`);
-    return validateUnallocatedStorageRun({ workflow, run, jobs, repository: input.repository, runId: input.revokeRunId, fromRevision: input.fromRevision });
+    const jobs = await input.readGitHub(`${root}/runs/${runId}/jobs?filter=all&per_page=1`);
+    return validateUnallocatedStorageRun({ workflow, run, jobs, repository: input.repository, runId, fromRevision });
   };
   return async () => {
-    const firstCheckedAt = now().toISOString(), before = await inspect();
+    const firstCheckedAt = now().toISOString();
+    const checked = new Map<string, { before: Snapshot; existing: RecordEvidence | null }>();
+    let claimFenceVerified = false;
+    const track = async (runId: string, explicit: boolean) => {
+      if (checked.size >= 16) fail("run-revocation-replay-bound");
+      const existing = await loadRecord(input.ops, storageGitHubRevocationKey(runId));
+      if (!existing && !explicit) fail("workflow-writer-active");
+      if (existing) {
+        if (existing.snapshot.repository !== input.repository) fail("run-revocation-record-conflict");
+        const sameTransition = existing.fromRevision === input.fromRevision && existing.approvalRevision === input.codeRevision
+          && await storageHash(existing.operatorMigration) === await storageHash(migration);
+        if (!sameTransition && !claimFenceVerified) {
+          if (!input.assertRevokedRunClaimFence) fail("revoked-run-claim-fence-required");
+          await input.assertRevokedRunClaimFence();
+          claimFenceVerified = true;
+        }
+      }
+      const before = await inspect(runId, existing?.fromRevision ?? input.fromRevision);
+      if (existing && await storageHash(existing.snapshot) !== await storageHash(before)) fail("run-revocation-record-conflict");
+      const candidate = { before, existing };
+      checked.set(runId, candidate);
+      return candidate;
+    };
+    if (input.revokeRunId !== undefined) await track(input.revokeRunId, true);
     for (const workflow of ["eod-storage-migration.yml", "eod-market-data.yml"]) {
-      const check = (value: unknown, status?: string) => {
+      const check = async (value: unknown, status?: string) => {
         const body = object(value);
         if (!body || !Number.isSafeInteger(body.total_count) || Number(body.total_count) < 0 || !Array.isArray(body.workflow_runs)
           || body.workflow_runs.length > 100 || (status && body.total_count !== body.workflow_runs.length)) fail("workflow-inventory-invalid");
@@ -96,27 +121,30 @@ export function createStorageWorkflowQuiescence(input: {
           const run = object(raw);
           if (!run || typeof run.status !== "string" || (status && run.status !== status)) fail("workflow-inventory-invalid");
           if (run.status === "completed") continue;
-          if (!before || workflow !== "eod-storage-migration.yml" || String(run.id) !== before.runId
+          if (workflow !== "eod-storage-migration.yml" || !Number.isSafeInteger(run.id) || !RUN_ID.test(String(run.id))) fail("workflow-writer-active");
+          const { before } = checked.get(String(run.id)) ?? await track(String(run.id), false);
+          if (String(run.id) !== before.runId
             || run.status !== "queued" || run.head_sha !== before.headRevision || run.run_attempt !== before.attempt
             || run.workflow_id !== before.workflowId) fail("workflow-writer-active");
         }
       };
-      check(await input.readGitHub(`${root}/workflows/${workflow}/runs?per_page=100`));
+      await check(await input.readGitHub(`${root}/workflows/${workflow}/runs?per_page=100`));
       for (const status of liveStatuses) {
-        check(await input.readGitHub(`${root}/workflows/${workflow}/runs?status=${status}&per_page=100`), status);
+        await check(await input.readGitHub(`${root}/workflows/${workflow}/runs?status=${status}&per_page=100`), status);
       }
     }
-    const after = await inspect(), secondCheckedAt = now().toISOString();
-    if (!before || !after || !input.revokeRunId) return;
-    if (await storageHash(before) !== await storageHash(after)) fail("unallocated-run-evidence-changed");
-    const key = storageGitHubRevocationKey(input.revokeRunId), existing = await loadRecord(input.ops, key);
-    if (existing) {
-      if (await storageHash(existing.snapshot) !== await storageHash(before) || existing.fromRevision !== input.fromRevision
-        || existing.approvalRevision !== input.codeRevision || await storageHash(existing.operatorMigration) !== await storageHash(migration)) {
-        fail("run-revocation-record-conflict");
+    for (const [runId, { before, existing }] of checked) {
+      const after = await inspect(runId, existing?.fromRevision ?? input.fromRevision);
+      if (await storageHash(before) !== await storageHash(after)) fail("unallocated-run-evidence-changed");
+      if (existing) {
+        const retained = await loadRecord(input.ops, storageGitHubRevocationKey(runId));
+        if (!retained || retained.evidenceHash !== existing.evidenceHash) fail("run-revocation-record-conflict");
       }
-      return;
     }
+    const secondCheckedAt = now().toISOString();
+    const candidate = input.revokeRunId ? checked.get(input.revokeRunId) : undefined;
+    if (!candidate || candidate.existing || !input.revokeRunId) return;
+    const { before } = candidate, key = storageGitHubRevocationKey(input.revokeRunId);
     const unsigned = { version: 1 as const, policy: "explicit-unallocated-storage-run-revocation-v1" as const,
       scope: "github-run-id-all-migrations" as const, dispatchInputsVerified: false as const,
       operatorMigration: migration, fromRevision: input.fromRevision, approvalRevision: input.codeRevision,

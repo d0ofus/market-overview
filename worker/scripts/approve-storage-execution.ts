@@ -69,8 +69,20 @@ async function main(): Promise<void> {
         || !oldRunner.includes("githubRunId:process.env.GITHUB_RUN_ID,executionRevision:codeRevision")
         || !oldControl.includes("COALESCE(execution_revision,code_revision)=?")) throw new Error("storage-execution-old-runner-revision-fence-required");
     }
+    const assertRevokedRunClaimFence = async () => {
+      // A previous transition's revocation is reusable only when the actual
+      // current executor atomically denies that global GitHub run ID.
+      const oldRunner = command("git",["show",`${fromRevision}:worker/scripts/market-storage-runner.ts`]);
+      const oldControl = command("git",["show",`${fromRevision}:worker/src/market-storage-control.ts`]);
+      if (!oldRunner.includes("await assertStorageExecutionRevision(meteredOps,existing,codeRevision)")
+        || !oldRunner.includes("githubRunId:process.env.GITHUB_RUN_ID,executionRevision:codeRevision")
+        || !oldControl.includes("COALESCE(execution_revision,code_revision)=?")
+        || !oldControl.includes("storageGitHubRevocationKey(options.githubRunId)")
+        || !oldControl.includes("AND (? IS NULL OR NOT EXISTS(SELECT 1 FROM eod_rollout_evidence WHERE id=?))")
+        || !oldControl.includes("revocationKey,revocationKey")) throw new Error("storage-execution-revoked-run-claim-fence-required");
+    };
     const assertNoWorkflowWriters = createStorageWorkflowQuiescence({ops,repository,migration:storageMigrationIdentity(run),
-      fromRevision,codeRevision,revokeRunId,readGitHub:async path=>gh(path)});
+      fromRevision,codeRevision,revokeRunId,readGitHub:async path=>gh(path),assertRevokedRunClaimFence});
     const record = await approveStorageExecutionTransition({ops,source:db(source),migrationId:id,fromRevision,codeRevision,
       changedFiles,diffHash:createHash("sha256").update(diff).digest("hex"),assertReviewedCheckout,assertNoWorkflowWriters});
     command("gh",["variable","set","EOD_STORAGE_EXECUTION_REVISION","--env","market-eod","--repo",repository,"--body",codeRevision]);

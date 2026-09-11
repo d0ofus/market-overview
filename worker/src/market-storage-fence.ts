@@ -10,15 +10,17 @@ function internal(name:string):boolean {
   return name.startsWith("sqlite_") || name.startsWith("_cf_") || name==="market_storage_fence" || name.startsWith(prefix);
 }
 const normalize=(sql:string) => sql.trim().replace(/;\s*$/," ").replace(/\bIF NOT EXISTS\b/ig,"").replace(/\s+/g," ").trim();
+const schemaSql="SELECT type,name,tbl_name AS tableName,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name";
+const fenceSql=`SELECT status,revision,migration_id AS migrationId,code_revision AS codeRevision,
+    schema_hash AS schemaHash,snapshot_revision AS snapshotRevision FROM market_storage_fence WHERE id='default'`;
 async function schema(source:D1Database):Promise<SchemaObject[]> {
-  const result=await source.prepare("SELECT type,name,tbl_name AS tableName,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name")
+  const result=await source.prepare(schemaSql)
     .all<SchemaObject>();
   if (result.results.length>1_000) throw new Error("storage-migration-schema-exceeds-bound");
   return result.results;
 }
 async function fence(source:D1Database):Promise<Fence> {
-  const value=await source.prepare(`SELECT status,revision,migration_id AS migrationId,code_revision AS codeRevision,
-    schema_hash AS schemaHash,snapshot_revision AS snapshotRevision FROM market_storage_fence WHERE id='default'`).first<Fence>();
+  const value=await source.prepare(fenceSql).first<Fence>();
   if (!value) throw new Error("storage-migration-fence-schema-required");
   return value;
 }
@@ -37,6 +39,11 @@ function trigger(table:string,event:"INSERT"|"UPDATE"|"DELETE"):string {
 export async function prepareStorageSourceFence(source:D1Database):Promise<StorageSourcePlan> {
   await fence(source);
   const objects=await schema(source);
+  return planFromSchema(objects);
+}
+/** Pure planning preserves the captured SQL bytes and canonical object order. */
+async function planFromSchema(objects:SchemaObject[]):Promise<StorageSourcePlan> {
+  if (objects.length>1_000) throw new Error("storage-migration-schema-exceeds-bound");
   const canonical=objects.filter((row) => !internal(row.name) && !internal(row.tableName));
   const tables=canonical.filter((row) => row.type==="table").map((row) => row.name).sort();
   if (!tables.length || tables.length>100 || tables.some((table) => !tableIdentifier.test(table))
@@ -50,12 +57,15 @@ async function verifiedPlan(source:D1Database,expectedSchemaHash:string):Promise
   const plan=await prepareStorageSourceFence(source);
   if (plan.schemaHash!==expectedSchemaHash) throw new Error("storage-migration-source-schema-changed");
   const objects=await schema(source);
+  verifyGuards(plan,objects);
+  return plan;
+}
+function verifyGuards(plan:StorageSourcePlan,objects:SchemaObject[]):void {
   const guards=objects.filter((row) => row.type==="trigger" && row.name.startsWith(prefix));
   const expected=new Set(plan.statements.map((statement) => normalize(statement.sql)));
   if (guards.length!==expected.size || guards.some((row) => !row.sql || !expected.has(normalize(row.sql)))) {
     throw new Error("storage-migration-source-fence-incomplete");
   }
-  return plan;
 }
 /** Explicit freeze is durable across process exits, lease expiry and UTC resets.
  * All prior writes finish before this singleton update; later table DML aborts.
@@ -69,8 +79,17 @@ export async function freezeStorageSource(source:D1Database,identity:StorageMigr
   return assertStorageSourceFrozen(source,identity,expectedSchemaHash);
 }
 export async function assertStorageSourceFrozen(source:D1Database,identity:StorageMigrationIdentity,expectedSchemaHash:string):Promise<{schemaHash:string;revision:number}> {
-  await verifiedPlan(source,expectedSchemaHash);
-  const state=await fence(source);
+  // D1 executes a batch transactionally: schema, every guard and the singleton
+  // capture are from one read transaction, with one REST round trip. No state
+  // is cached between caller batches. Freeze/release planning is unchanged.
+  const results=await source.batch([source.prepare(schemaSql),source.prepare(fenceSql)]);
+  if (results.length!==2) throw new Error("storage-migration-fence-read-incomplete");
+  const states=results[1].results as Fence[];
+  if (states.length!==1) throw new Error("storage-migration-fence-schema-required");
+  const state=states[0],objects=results[0].results as SchemaObject[];
+  const plan=await planFromSchema(objects);
+  if (plan.schemaHash!==expectedSchemaHash) throw new Error("storage-migration-source-schema-changed");
+  verifyGuards(plan,objects);
   if (state.status!=="frozen" || state.migrationId!==identity.id || state.codeRevision!==identity.codeRevision
     || state.schemaHash!==expectedSchemaHash || state.snapshotRevision!==state.revision
     || !Number.isSafeInteger(state.revision) || state.revision<0) throw new Error("storage-migration-source-capture-changed");

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSqliteD1 } from "./helpers/sqlite-d1";
 import { createStorageWorkflowQuiescence, storageGitHubRevocationKey, validateUnallocatedStorageRun } from "../src/market-storage-github-revocation";
 import { claimStorageMigration, createStorageMigration, loadStorageMigration, type StorageMigrationIdentity } from "../src/market-storage-control";
+import { storageHash } from "../src/market-storage-pages";
 
 const repository = "test/repo", runId = "34569210842", origin = "a".repeat(40), next = "b".repeat(40);
 const now = new Date("2026-09-11T07:00:00Z");
@@ -63,6 +64,70 @@ describe("explicit empty GitHub storage-run revocation", () => {
     expect(await sqlite.db.prepare("SELECT evidence_json FROM eod_rollout_evidence WHERE id=?").bind(key).first("evidence_json")).toBe(before);
     expect(read.mock.calls.filter(([path]) => path.endsWith(`/runs/${runId}`))).toHaveLength(4);
     expect((await loadStorageMigration(sqlite.db, migration.id))?.status).toBe("queued");
+  });
+
+  it.each([undefined,runId])("reuses an earlier transition's exact revocation without rewriting it (explicit ID: %s)", async revokeRunId => {
+    await guard()();
+    const key=storageGitHubRevocationKey(runId);
+    const before=await sqlite.db.prepare("SELECT evidence_json,updated_at FROM eod_rollout_evidence WHERE id=?").bind(key).first();
+    const read=github(),assertRevokedRunClaimFence=vi.fn(async () => undefined);
+    const check=createStorageWorkflowQuiescence({ops:sqlite.db,repository,migration,fromRevision:next,codeRevision:"c".repeat(40),
+      revokeRunId,readGitHub:read,now:()=>new Date(now.getTime()+60_000),assertRevokedRunClaimFence});
+    await check();
+    expect(assertRevokedRunClaimFence).toHaveBeenCalledOnce();
+    expect(read.mock.calls.filter(([path]) => path.endsWith(`/runs/${runId}`))).toHaveLength(2);
+    expect(await sqlite.db.prepare("SELECT evidence_json,updated_at FROM eod_rollout_evidence WHERE id=?").bind(key).first()).toEqual(before);
+    await sqlite.db.prepare("UPDATE market_storage_migrations SET execution_revision=? WHERE id=?").bind(next,migration.id).run();
+    expect(await claimStorageMigration(sqlite.db,migration.id,{githubRunId:runId,executionRevision:next,now})).toBeNull();
+  });
+
+  it("requires the actual current executor's deny fence before prior-transition reuse", async () => {
+    await guard()();
+    const input={ops:sqlite.db,repository,migration,fromRevision:next,codeRevision:"c".repeat(40),readGitHub:github()};
+    await expect(createStorageWorkflowQuiescence(input)()).rejects.toThrow("revoked-run-claim-fence-required");
+    const reject=vi.fn(async () => {throw new Error("reviewed-current-claim-denial-missing");});
+    await expect(createStorageWorkflowQuiescence({...input,assertRevokedRunClaimFence:reject})()).rejects.toThrow("reviewed-current-claim-denial-missing");
+  });
+
+  it("rejects a corrupt record, mismatched key/repository/head, or a disappeared denial on later reuse", async () => {
+    await guard()();
+    const key=storageGitHubRevocationKey(runId);
+    const original=(await sqlite.db.prepare("SELECT evidence_json FROM eod_rollout_evidence WHERE id=?").bind(key).first<string>("evidence_json"))!;
+    const later=(readGitHub:(path:string)=>Promise<unknown>=github())=>createStorageWorkflowQuiescence({ops:sqlite.db,repository,migration,fromRevision:next,
+      codeRevision:"c".repeat(40),readGitHub,assertRevokedRunClaimFence:async()=>undefined});
+    for (const change of ["hash","key","repository","head"]) {
+      const parsed=JSON.parse(original) as Record<string,unknown>;
+      const snapshot={...parsed.snapshot as Record<string,unknown>};
+      if(change==="key")snapshot.runId="123";
+      if(change==="repository")snapshot.repository="other/repo";
+      if(change==="head")parsed.fromRevision=next;
+      const changedRecord:Record<string,unknown>={...parsed,snapshot};
+      const {evidenceHash:_,...unsigned}=changedRecord;
+      const changed={...unsigned,evidenceHash:change==="hash" ? "0".repeat(64) : await storageHash(unsigned)};
+      await sqlite.db.prepare("UPDATE eod_rollout_evidence SET evidence_json=? WHERE id=?").bind(JSON.stringify(changed),key).run();
+      await expect(later()()).rejects.toThrow(/run-revocation-record-(invalid|conflict)/);
+    }
+    await sqlite.db.prepare("UPDATE eod_rollout_evidence SET evidence_json=? WHERE id=?").bind(original,key).run();
+    const read=github();
+    await expect(later(async path => {
+      if(path.includes("/workflows/eod-market-data.yml/runs?per_page=100")) {
+        await sqlite.db.prepare("DELETE FROM eod_rollout_evidence WHERE id=?").bind(key).run();
+      }
+      return read(path);
+    })()).rejects.toThrow("run-revocation-record-conflict");
+  });
+
+  it("blocks allocated, changed, or competing writers despite an older valid revocation", async () => {
+    await guard()();
+    const check=(readGitHub:ReturnType<typeof github>)=>createStorageWorkflowQuiescence({ops:sqlite.db,repository,migration,
+      fromRevision:next,codeRevision:"c".repeat(40),readGitHub,assertRevokedRunClaimFence:async()=>undefined});
+    for(const change of [{updated_at:"2026-09-11T06:17:00Z"},{check_suite_id:778},{head_sha:next}]) {
+      await expect(check(github({mutateRun:()=>({...ghost(),...change})}))()).rejects.toThrow(/record-conflict|evidence-invalid/);
+      await expect(check(github({mutateRun:index=>index===1 ? ghost() : {...ghost(),...change}}))()).rejects.toThrow(/evidence-(changed|invalid)/);
+    }
+    await expect(check(github({jobs:{total_count:1,jobs:[{id:1,status:"queued"}]}}))()).rejects.toThrow("evidence-invalid");
+    await expect(check(github({other:true}))()).rejects.toThrow("workflow-writer-active");
+    await expect(check(github({incomplete:true}))()).rejects.toThrow("workflow-inventory-invalid");
   });
 
   it("never ignores another writer or an incomplete filtered inventory", async () => {

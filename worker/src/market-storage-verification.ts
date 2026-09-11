@@ -125,13 +125,13 @@ async function advance(table:StorageTable,cursor:Cursor,rows:StorageRow[],limit:
     hash:await storageHash([cursor.hash,canonicalStorageRows(table,rows)]),done:rows.length<limit,pages:cursor.pages+1};
 }
 async function loadBlock(history:D1Database,id:string,active=false):Promise<{block:MarketHistoryBlock;bars:MarketHistoryBar[]}> {
-  const block=await history.prepare(`SELECT ${BLOCK_COLUMNS} FROM market_history_blocks b WHERE b.id=?`).bind(id).first<MarketHistoryBlock>();
+  const block=await history.prepare(`SELECT ${BLOCK_COLUMNS} FROM market_history_blocks b WHERE b.id=? /* storage-archive-point-read */`).bind(id).first<MarketHistoryBlock>();
   if (!block || (active && !block.verifiedAt)) throw new Error("storage-verification-archive-block-missing-or-unverified");
   return {block,bars:await decodeMarketHistoryBlock(block)};
 }
 async function loadPointer(history:D1Database,feed:StorageCell,ticker:StorageCell,year:StorageCell):Promise<Pointer> {
   const pointer=await history.prepare(`SELECT feed,ticker,calendar_year,block_id,previous_block_id,updated_at FROM market_history_block_pointers
-    WHERE feed=? AND ticker=? AND calendar_year=?`).bind(feed,ticker,year).first<Pointer>();
+    WHERE feed=? AND ticker=? AND calendar_year=? /* storage-archive-point-read */`).bind(feed,ticker,year).first<Pointer>();
   if (!pointer) throw new Error("storage-verification-archive-pointer-missing");
   return pointer;
 }
@@ -153,7 +153,7 @@ async function loadBlocks(history:D1Database,ids:readonly string[]):Promise<Map<
   for(let offset=0;offset<unique.length;offset+=8) {
     const selected=unique.slice(offset,offset+8);
     const results=await history.batch<MarketHistoryBlock>(selected.map((id)=>history.prepare(
-      `SELECT ${BLOCK_COLUMNS} FROM market_history_blocks b WHERE b.id=?`).bind(id)));
+      `SELECT ${BLOCK_COLUMNS} FROM market_history_blocks b WHERE b.id=? /* storage-archive-point-read */`).bind(id)));
     for(let index=0;index<selected.length;index++) {
       const block=results[index].results[0];
       if(!block || block.id!==selected[index])throw new Error("storage-verification-archive-block-missing-or-unverified");
@@ -305,7 +305,7 @@ export async function runStorageVerification(context:Context & {
     const {groups,next}=await readYears();
     if(!groups.length) {prices.done=true;await state.save("verification:prices",prices);break;}
     const pointerRows=await history.batch<Pointer>(groups.map((rows)=>history.prepare(`SELECT feed,ticker,calendar_year,block_id,previous_block_id,updated_at
-      FROM market_history_block_pointers WHERE feed=? AND ticker=? AND calendar_year=?`)
+      FROM market_history_block_pointers WHERE feed=? AND ticker=? AND calendar_year=? /* storage-archive-point-read */`)
       .bind(rows[0].feed,rows[0].ticker,Number(String(rows[0].date).slice(0,4)))));
     if(pointerRows.some((result)=>result.results.length!==1))throw new Error("storage-verification-archive-pointer-missing");
     const archivedGroups=await activeBlocks(history,pointerRows.map((result)=>result.results[0]));
@@ -373,7 +373,7 @@ export async function runStorageVerification(context:Context & {
       for (const row of rows) {
         await check();
         if (table===BLOCKS) {
-          const current=await history.prepare(`SELECT ${BLOCKS.columns.map(quoteStorageIdentifier).join(",")} FROM market_history_blocks WHERE id=?`)
+          const current=await history.prepare(`SELECT ${BLOCKS.columns.map(quoteStorageIdentifier).join(",")} FROM market_history_blocks WHERE id=? /* storage-archive-point-read */`)
             .bind(row.id).first<StorageRow>();
           if (!current || canonicalStorageRows(BLOCKS,[current])!==canonicalStorageRows(BLOCKS,[row])) throw new Error("storage-verification-old-archive-revision-lost");
         } else {

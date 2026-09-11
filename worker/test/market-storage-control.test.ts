@@ -118,6 +118,40 @@ describe("durable market storage migration controls and source fencing",{timeout
     source.script("CREATE TABLE unexpected_table(id TEXT PRIMARY KEY);");
     await expect(assertStorageSourceFrozen(source.db,identity,plan.schemaHash)).rejects.toThrow("schema-changed");
   });
+  it("reads the full schema and capture in one atomic batch without cached state or a changed canonical hash",async () => {
+    const plan=await install();
+    await source.db.prepare("INSERT INTO universes(id,name) VALUES('retained','Retained source')").run();
+    const capture=await freezeStorageSource(source.db,identity,plan.schemaHash,now);
+    const nativeBatch=source.db.batch.bind(source.db),nativePrepare=source.db.prepare.bind(source.db),queries:string[]=[];
+    let calls=0;
+    const atomic={...source.db,prepare:(sql:string)=>{
+      queries.push(sql);
+      const statement=nativePrepare(sql);
+      // Assertion must use the batch's native handles, never issue a separate
+      // first()/all()/run() read before or after the transaction.
+      return Object.assign(statement,{first:()=>{throw new Error("unexpected-separate-fence-read");},
+        all:()=>{throw new Error("unexpected-separate-schema-read");},run:()=>{throw new Error("unexpected-separate-fence-write");}});
+    },batch:async<T>(statements:D1PreparedStatement[])=>{calls++;return nativeBatch<T>(statements);}} as unknown as D1Database;
+    expect(await assertStorageSourceFrozen(atomic,identity,plan.schemaHash)).toEqual(capture);
+    expect(calls).toBe(1);expect(queries).toHaveLength(2);
+    expect(queries[0]).toContain("FROM sqlite_schema");expect(queries[1]).toContain("FROM market_storage_fence");
+    expect((await prepareStorageSourceFence(source.db)).schemaHash).toBe(plan.schemaHash);
+    await source.db.prepare("UPDATE market_storage_fence SET revision=revision+1").run();
+    await expect(assertStorageSourceFrozen(atomic,identity,plan.schemaHash)).rejects.toThrow("capture-changed");
+    expect(calls).toBe(2);
+    expect(await source.db.prepare("SELECT name FROM universes WHERE id='retained'").first("name")).toBe("Retained source");
+  });
+  it("detects missing and altered guards from the same atomic capture without accepting a stored schema hash alone",async () => {
+    const plan=await install();await freezeStorageSource(source.db,identity,plan.schemaHash,now);
+    source.script("DROP TRIGGER market_storage_guard_universes_insert;");
+    await expect(assertStorageSourceFrozen(source.db,identity,plan.schemaHash)).rejects.toThrow("fence-incomplete");
+    const statement=plan.statements.find(row=>row.sql.includes("market_storage_guard_universes_insert"))!.sql;
+    source.script(statement.replace("='frozen'","='wrong-status'"));
+    await expect(assertStorageSourceFrozen(source.db,identity,plan.schemaHash)).rejects.toThrow("fence-incomplete");
+    source.script("DROP TRIGGER market_storage_guard_universes_insert;\n"+statement);
+    expect((await assertStorageSourceFrozen(source.db,identity,plan.schemaHash)).schemaHash).toBe(plan.schemaHash);
+    await expect(source.db.prepare("INSERT INTO universes(id,name) VALUES('blocked','Blocked')").run()).rejects.toThrow("source-frozen");
+  });
   it("checks exact target seed contents and rejects existing application data",async () => {
     const plan=await prepareStorageSourceFence(source.db);
     await source.db.prepare("UPDATE market_data_maintenance_state SET updated_at='2026-09-09 00:00:00'").run();

@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { estimateEodQueries } from "../src/eod-d1-rest";
 import { createSqliteD1 } from "./helpers/sqlite-d1";
 import { STORAGE_TABLES, STORAGE_INDEXES, STORAGE_TRIGGERS } from "../src/market-storage-schema";
 import { copyStorageArchiveBlock, storageBar } from "../src/market-storage-copy";
@@ -69,6 +70,8 @@ describe("independent whole-storage verification on real SQLite",{timeout:180_00
   it("resumes a bounded verification, proves exact tables/hot rows and retained old archive revisions, and never claims live acceptance",async () => {
     const f=await fixture({supportRows:501});
     try {
+      const historyQueries:string[]=[],prepare=f.history.db.prepare.bind(f.history.db);
+      vi.spyOn(f.history.db,"prepare").mockImplementation((sql) => {historyQueries.push(sql);return prepare(sql);});
       await expect(runStorageVerification({...f.context,deadlineMs:0})).rejects.toThrow("storage-verification-time-slice-complete");
       expect(await loadStorageMigrationCheckpoint(f.ops.db,identity.id,"verification:captures")).not.toBeNull();
       await expect(f.target.db.prepare("INSERT INTO d1_migrations(name) VALUES('concurrent.sql')").run()).rejects.toThrow("market-storage-source-frozen");
@@ -79,6 +82,21 @@ describe("independent whole-storage verification on real SQLite",{timeout:180_00
       expect(evidence.tables).toHaveLength(STORAGE_TABLES.length);
       expect(evidence.tables.find((row) => row.name==="d1_migrations")?.rows).toBe(1);
       expect(evidence.tables.find((row) => row.name==="overview_provider_catalog_cache")?.rows).toBe(501);
+      // Exercise the actual verifier statements, including previous revisions
+      // and the pre-copy baseline. Only complete primary-key lookups receive
+      // the small admission bound; archive inventory scans retain page bounds.
+      const points=[...new Set(historyQueries.filter((sql) => /^\s*SELECT\b/.test(sql)
+        && /FROM market_history_(blocks|block_pointers)\b/.test(sql))
+        .map((sql) => sql.replace(/\s+/g," ").trim()))];
+      expect(points).toHaveLength(3);
+      for (const sql of points) {
+        expect(sql).toMatch(/\/\* storage-archive-point-read \*\/$/);
+        const params=sql.includes("FROM market_history_block_pointers") ? ["sip","TEST",2026] : [f.prior.id];
+        expect(estimateEodQueries([{sql,params}])).toEqual({reads:64,writes:0});
+        const plan=await prepare(`EXPLAIN QUERY PLAN ${sql}`).bind(...params).all<{detail:string}>();
+        expect(plan.results.some((row) => /SEARCH .* USING PRIMARY KEY/.test(row.detail))).toBe(true);
+        expect(plan.results.some((row) => /\bSCAN\b/.test(row.detail))).toBe(false);
+      }
       expect(await loadStorageMigrationCheckpoint(f.ops.db,identity.id,"verification:table:overview_provider_catalog_cache"))
         .toMatchObject({payload:{rows:501,pages:3,done:true}});
       expect(evidence.remainingLiveGates).toContain("consumer-parity");
