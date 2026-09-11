@@ -2,7 +2,8 @@ import { loadConfig } from "./db";
 import { refreshBreadthUniverseMemberships, loadEodMemberships } from "./eod";
 import { ensureMarketCalendarCoverage } from "./market-calendar-cache";
 import { loadMarketHistory, archiveMarketHistoryBars, marketHistoryBarsMateriallyEqual } from "./market-history";
-import { EodPriceProvider, yahooWindowMatchesAlpaca, type EodPriceBar } from "./eod-price-provider";
+import { EodPriceProvider, selectYahooEodSessions, yahooWindowMatchesAlpaca, type EodPriceBar } from "./eod-price-provider";
+import { reviewedEodTickerAlias } from "./eod-ticker-aliases";
 import { computeEodTickerMetrics, computeEodBreadthMetrics, EOD_METRICS_VERSION, type EodMetricBar, type EodTickerMetrics } from "./eod-metrics";
 import { eodHash, storeEodPublication } from "./eod-publication-service";
 import { EOD_PUBLICATION_SCOPES,eodRunHistorySelection,type EodRun } from "./eod-coordinator";
@@ -117,11 +118,13 @@ export function overviewPayload(inputs: FrozenInputs, features: Map<string, EodT
           const failure=diagnostics[item.ticker]?.slice(0,250);
           const lifecycle = getEtfLifecycle(item.ticker);
           const closed = lifecycle && session > lifecycle.lastTradingDate;
-          const reason = hasPrice ? `Verified ${session} EOD close from ${source}; each populated metric requires its exact session window.`
+          const alias = reviewedEodTickerAlias(item.ticker, session);
+          const identityDetail = alias ? ` ${item.ticker} is the retained historical alias; this fund trades as ${alias.currentSymbol} from ${alias.effectiveDate}. Issuer: ${alias.sourceUrl}` : "";
+          const reason = (hasPrice ? `Verified ${session} EOD close from ${source}; each populated metric requires its exact session window.`
             : closed ? `No current price: fund liquidated ${lifecycle.liquidationDate}; last trading session ${lifecycle.lastTradingDate}. Source result: ${lifecycle.sourceUrl}`
-            : `No verified EOD price for ${session}; no earlier quote is substituted.${failure ? ` Source result: ${failure}.` : ""}`;
+            : `No verified EOD price for ${session}; no earlier quote is substituted.${failure ? ` Source result: ${failure}.` : ""}`) + identityDetail;
           return {
-            ticker: item.ticker, displayName: item.displayName, price: m.price, change1d: m.change1d, change1w: m.change1w,
+            ticker: item.ticker, displayName: alias ? `${alias.currentSymbol} (formerly ${item.ticker}) - ${alias.name}` : item.displayName, price: m.price, change1d: m.change1d, change1w: m.change1w,
             change5d: m.change5d, change3m: m.change3m, change6m: m.change6m, change21d: m.change21d, ytd: m.ytd,
             pctFrom52wHigh: m.pctFrom52wHigh, above20Sma: m.above20Sma, above50Sma: m.above50Sma, above200Sma: m.above200Sma,
             sparkline: points.length ? m.sparkline : null, sparklineDates: m.sparklineDates,
@@ -375,10 +378,12 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
       let history=await loadMarketHistory(env,{tickers,feed:"sip",endDate:run.session_date}) as EodPriceBar[];
       const yahooPending=await env.MARKET_DATA_DB.prepare("SELECT ticker,start_date as startDate FROM eod_adjustment_repairs WHERE feed='yahoo-eod' AND status='pending' AND ticker IN (SELECT value FROM json_each(?))")
         .bind(JSON.stringify(tickers)).all<{ticker:string;startDate:string}>();
+      const yahooRepairDiagnostics=new Map<string,string>();
       for (const row of yahooPending.results) {
         checkContinuation();
         const repaired=await repairEodYahoo(env,provider,row.ticker,run.session_date,row.startDate,history.filter((bar) => bar.ticker===row.ticker));
         ownRevisionChanges.push(...repaired.revisions);
+        if (repaired.diagnostic) yahooRepairDiagnostics.set(row.ticker,repaired.diagnostic);
       }
       const cachedYahoo=env.MARKET_HISTORY_DB
         ? await loadMarketHistory(env,{tickers,feed:"yahoo-eod",startDate:start,endDate:run.session_date}) as EodPriceBar[] : [];
@@ -471,6 +476,8 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
       const chunkFeatures:Array<[string,EodTickerMetrics]>=[];
       for (const ticker of tickers) {
         checkContinuation();
+        const repairDiagnostic=yahooRepairDiagnostics.get(ticker);
+        if (repairDiagnostic) errors[ticker]=repairDiagnostic;
         const lifecycle = getEtfLifecycle(ticker);
         const closed = lifecycle && run.session_date > lifecycle.lastTradingDate;
         const own=[...merged.values()].filter((bar) => bar.ticker===ticker && bar.sourceProvider==="alpaca" && bar.adjustment==="split"
@@ -483,9 +490,10 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
         if (!closed && (metric.price===null || metric.change1d===null || metric.above200Sma===null) && yahooAttempts<200) {
           yahooAttempts++;
           try {
-            const fallback=await provider.yahoo(ticker,start,run.session_date,own);
+            const fetchedFallback=await provider.yahoo(ticker,start,run.session_date,own);
             checkContinuation();
-            if (fallback.some((bar) => !inputs.calendarDates.includes(bar.date))) throw new Error("yahoo-unexpected-exchange-session");
+            const {bars:fallback,diagnostic}=selectYahooEodSessions(ticker,fetchedFallback,inputs.calendarDates);
+            if (diagnostic) errors[ticker]=diagnostic;
             // Compact fallback history is separate from the canonical SIP table.
             if (env.MARKET_HISTORY_DB) {
               const archived=await archiveMarketHistoryBars(env,fallback);

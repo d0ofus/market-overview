@@ -3,6 +3,7 @@ import type { Env } from "./types";
 import type { MarketHistoryBar } from "./market-history";
 import { assertYahooArchiveCapacity } from "./eod-fallback-storage";
 import { getEtfLifecycle } from "./etf-holdings-quality";
+import { reviewedEodTickerAlias } from "./eod-ticker-aliases";
 
 type AlpacaBar = { t: string; o: number; h: number; l: number; c: number; v: number };
 export type EodPriceBar = MarketHistoryBar & { reportedVolume: number | null };
@@ -27,9 +28,33 @@ const MAX_ALPACA_SYMBOLS = 100;
 const MAX_ALPACA_PAGES = 100;
 const sleep = (ms: number) => ms > 0 ? new Promise<void>((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
 
-export function yahooEodSymbol(ticker: string): string {
+export function yahooEodSymbol(ticker: string, targetSession?: string): string {
   const normalized = ticker.trim().toUpperCase();
+  const alias = targetSession ? reviewedEodTickerAlias(normalized, targetSession) : null;
+  if (alias) return alias.currentSymbol;
   return INDEX_SYMBOLS[normalized]?.symbol ?? normalized.replace(/\./g, "-");
+}
+
+/** Select only authoritative equity sessions after Yahoo identity/OHLC checks.
+ * VIX can include additional dated observations on equity-market holidays;
+ * quarantine those observations without inventing or shifting any session. */
+export function selectYahooEodSessions(ticker: string, bars: EodPriceBar[], calendarDates: readonly string[]): {
+  bars: EodPriceBar[]; diagnostic: string | null;
+} {
+  const sessions = new Set(calendarDates);
+  const discarded = bars.filter((bar) => !sessions.has(bar.date));
+  if (!discarded.length) return { bars, diagnostic: null };
+  if (ticker !== "VIX" || !calendarDates.length) throw new Error("yahoo-unexpected-exchange-session");
+  // This exception never turns another security, provider, or adjustment basis
+  // into VIX. The provider must already have verified ^VIX INDEX/USD/Chicago.
+  if (bars.some((bar) => bar.ticker !== "VIX" || bar.sourceProvider !== "yahoo"
+    || bar.feed !== "yahoo-eod" || bar.adjustment !== "split")) {
+    throw new Error("yahoo-instrument-identity-unverified");
+  }
+  if (bars.some((bar) => !validEodBar(bar, calendarDates.at(-1)!))) throw new Error("yahoo-unexpected-exchange-session");
+  const dates = [...new Set(discarded.map((bar) => bar.date))].sort();
+  return { bars: bars.filter((bar) => sessions.has(bar.date)),
+    diagnostic: `yahoo-vix-off-calendar-quarantined:count=${discarded.length};dates=${dates.slice(0, 12).join(",")}${dates.length > 12 ? ";dates-truncated" : ""}` };
 }
 
 export function yahooWindowMatchesAlpaca(ticker:string,bars:EodPriceBar[],overlap:EodPriceBar[]):boolean {
@@ -137,7 +162,7 @@ export class EodPriceProvider {
     throw lastError;
   }
 
-  private async alpacaPages(tickers: string[], start: string, target: string, adjustment: "split" | "raw"): Promise<EodPriceBar[]> {
+  private async alpacaPages(tickers: string[], start: string, target: string, adjustment: "split" | "raw", asof = target): Promise<EodPriceBar[]> {
     const bounds = range(start, target);
     const end = new Date(Math.min(Date.now() - 16 * 60_000, bounds.endMs)).toISOString();
     const out = new Map<string, EodPriceBar>();
@@ -145,7 +170,7 @@ export class EodPriceProvider {
     const seen = new Set<string>();
     for (let page = 0; page < MAX_ALPACA_PAGES; page += 1) {
       const params = new URLSearchParams({ symbols: tickers.join(","), timeframe: "1Day", start: bounds.start,
-        end, feed: "sip", adjustment, asof: target, limit: "10000", sort: "asc" });
+        end, feed: "sip", adjustment, asof, limit: "10000", sort: "asc" });
       if (token) params.set("page_token", token);
       const response = await this.request(`https://data.alpaca.markets/v2/stocks/bars?${params}`, "alpaca");
       const json = await readBody(response, "alpaca", () => response.json()) as {
@@ -204,11 +229,11 @@ export class EodPriceProvider {
     // At most 2N-1 sub-batches for N symbols. Only confirmed invalid-symbol 400s
     // split; invalid parameters, 401/403, 429 and 5xx propagate without splitting.
     let remaining = Math.max(1, supported.length * 2 - 1);
-    const fetchBatch = async (symbols: string[]): Promise<EodPriceBar[]> => {
+    const fetchBatch = async (symbols: string[], asof = target): Promise<EodPriceBar[]> => {
       if (!symbols.length) return [];
       if (remaining-- <= 0) throw new Error("alpaca-symbol-isolation-limit");
       try {
-        return await this.alpacaPages(symbols, start, target, adjustment);
+        return await this.alpacaPages(symbols, start, target, adjustment, asof);
       } catch (error) {
         if (!(error instanceof EodProviderHttpError) || error.status !== 400 || !error.invalidSymbol) throw error;
         if (symbols.length === 1) {
@@ -216,10 +241,15 @@ export class EodPriceProvider {
           return [];
         }
         const split = Math.ceil(symbols.length / 2);
-        return [...await fetchBatch(symbols.slice(0, split)), ...await fetchBatch(symbols.slice(split))];
+        return [...await fetchBatch(symbols.slice(0, split), asof), ...await fetchBatch(symbols.slice(split), asof)];
       }
     };
-    return fetchBatch(supported);
+    const ordinary = supported.filter((ticker) => !reviewedEodTickerAlias(ticker, target));
+    const out = await fetchBatch(ordinary);
+    for (const ticker of supported.filter((symbol) => reviewedEodTickerAlias(symbol, target))) {
+      out.push(...await fetchBatch([ticker], reviewedEodTickerAlias(ticker, target)!.asofDate));
+    }
+    return out;
   }
 
   async yahoo(tickerInput: string, start: string, target: string, overlap: EodPriceBar[]): Promise<EodPriceBar[]> {
@@ -231,7 +261,8 @@ export class EodPriceProvider {
     }
     if (this.env.MARKET_HISTORY_DB) await assertYahooArchiveCapacity(this.env.MARKET_HISTORY_DB, ticker);
     const bounds = range(start, target);
-    const symbol = yahooEodSymbol(ticker);
+    const alias = reviewedEodTickerAlias(ticker, target);
+    const symbol = yahooEodSymbol(ticker, target);
     const params = new URLSearchParams({ interval: "1d", period1: String(Math.floor(Date.parse(bounds.start) / 1000)),
       period2: String(Math.floor(bounds.endMs / 1000)), events: "splits,div" });
     const response = await this.request(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?${params}`, "yahoo");
@@ -246,6 +277,8 @@ export class EodPriceProvider {
     if (json.chart?.error || !result || result.meta?.symbol?.toUpperCase() !== symbol
       || result.meta?.exchangeTimezoneName !== (index?.timeZone ?? "America/New_York")
       || (!index && (result.meta.currency!=="USD" || !["EQUITY","ETF"].includes(result.meta.instrumentType ?? "")))
+      || (alias && (result.meta.instrumentType !== "ETF" || ![result.meta.shortName, result.meta.longName].some((name) =>
+        typeof name === "string" && name.toLowerCase().replace(/[^a-z0-9]/g, "") === alias.name.toLowerCase().replace(/[^a-z0-9]/g, ""))))
       || (index && (result.meta.instrumentType !== "INDEX" || result.meta.currency !== "USD"
         || !index.name.test(`${result.meta.shortName ?? ""} ${result.meta.longName ?? ""}`)))) {
       throw new Error("yahoo-instrument-identity-unverified");

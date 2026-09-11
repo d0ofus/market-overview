@@ -1,5 +1,5 @@
 import { archiveMarketHistoryBars, loadMarketHistory } from "./market-history";
-import { EodPriceProvider, type EodPriceBar } from "./eod-price-provider";
+import { EodPriceProvider, selectYahooEodSessions, type EodPriceBar } from "./eod-price-provider";
 import { writeEodBars } from "./eod-bar-store";
 import type { Env } from "./types";
 import { ensureMarketCalendarCoverage } from "./market-calendar-cache";
@@ -61,16 +61,15 @@ export async function repairEodYahoo(env:Env,provider:EodPriceProvider,ticker:st
   const old=await loadMarketHistory(env,{tickers:[ticker],feed:"yahoo-eod",endDate:target,allowPendingAdjustmentRepair:true});
   const start=[startDate,old[0]?.date ?? startDate].sort()[0];
   await ensureMarketCalendarCoverage(env,target,start);
-  const bars=await provider.yahoo(ticker,start,target,alpaca);
+  const fetchedBars=await provider.yahoo(ticker,start,target,alpaca);
   const calendar=await env.MARKET_DATA_DB!.prepare("SELECT session_date as date FROM market_calendar_sessions WHERE session_date>=? AND session_date<=?")
     .bind(start,target).all<{date:string}>();
-  const sessions=new Set(calendar.results.map((row) => row.date));
-  if (bars.some((bar) => !sessions.has(bar.date))) throw new Error("yahoo-unexpected-exchange-session");
+  const {bars,diagnostic}=selectYahooEodSessions(ticker,fetchedBars,calendar.results.map((row) => row.date).sort());
   const dates=new Set(bars.map((bar) => bar.date));
   if (!dates.has(target) || old.some((bar) => !dates.has(bar.date))) throw new Error("adjustment-repair-incomplete");
   const archived=await archiveMarketHistoryBars(env,bars,{repairFenceToken:token});
   const complete=await env.MARKET_DATA_DB!.prepare("UPDATE eod_adjustment_repairs SET status='complete',owner_token=NULL,updated_at=? WHERE feed='yahoo-eod' AND ticker=? AND owner_token=?")
     .bind(new Date().toISOString(),ticker,token).run();
   if (!complete.meta.changes) throw new Error("adjustment-repair-fence-lost");
-  return {bars,revisions:archived.revisionChanges};
+  return {bars,revisions:archived.revisionChanges,diagnostic};
 }

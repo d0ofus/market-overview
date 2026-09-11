@@ -13,23 +13,36 @@ import { EOD_CATALOG_SCOPE } from "./eod-catalog-service";
 import { decodeEodPayload } from "./eod-publication-codec";
 
 export const STORAGE_VIX_PREVIOUS_REVISION = "6fea91f974270f4e161021f023ab3b1743988d59";
+export const STORAGE_VIX_QUARANTINE_PREVIOUS_REVISION = "257ca47d95327b9ff50873ffdcc10f2b51bf5cc3";
 const hash = z.string().regex(/^[a-f0-9]{64}$/), sha = z.string().regex(/^[a-f0-9]{40}$/);
 const codeSchema = z.object({ version: z.literal(1), policy: z.literal("vix-chicago-identity-only-v1"),
   fromRevision: z.literal(STORAGE_VIX_PREVIOUS_REVISION), codeRevision: sha,
   protectedFileCount: z.number().int().min(4), protectedManifestHash: hash, providerContractHash: hash,
   loaderContractHash: hash, reviewedChangesHash: hash, beforeTreeHash: hash, afterTreeHash: hash, evidenceHash: hash }).strict();
 export type StorageVixCodeContract = z.infer<typeof codeSchema>;
+const quarantineCodeSchema = z.object({ version: z.literal(2), policy: z.literal("vix-sessions-rsho-dated-alias-only-v2"),
+  fromRevision: z.literal(STORAGE_VIX_QUARANTINE_PREVIOUS_REVISION), codeRevision: sha,
+  protectedFileCount: z.number().int().min(4), protectedManifestHash: hash, providerContractHash: hash,
+  writerContractHash: hash, reviewedChangesHash: hash, beforeTreeHash: hash, afterTreeHash: hash, evidenceHash: hash }).strict();
+export type StorageVixQuarantineCodeContract = z.infer<typeof quarantineCodeSchema>;
+const identityPolicy = { version: 1 as const, policy: "preserve-bootstrap-vix-identity-correction-v1" as const,
+  fromRevision: STORAGE_VIX_PREVIOUS_REVISION, schema: codeSchema,
+  predecessorKey: (id: string, revision: string) => storageIndexLoaderContinuationKey(id, revision) };
+const quarantinePolicy = { version: 2 as const, policy: "preserve-bootstrap-vix-sessions-rsho-alias-v2" as const,
+  fromRevision: STORAGE_VIX_QUARANTINE_PREVIOUS_REVISION, schema: quarantineCodeSchema,
+  predecessorKey: (id: string, revision: string) => storageVixContinuationKey(id, revision) };
+type Policy = typeof identityPolicy | typeof quarantinePolicy;
 type Checkpoint = { checkpoint_key: string; input_hash: string; payload_json: string; updated_at: string };
 type FeatureCheckpoint = { run_id: string; chunk_key: string; input_hash: string; payload_json: string; updated_at: string };
 type EodRow = Record<string, string | number | null> & { id: string; input_json: string; progress_json: string; updated_at: string };
 type Publication = { id: string; scope: string; session_date: string; status: string; payload_json: string;
   payload_checksum: string; payload_codec: string | null; payload_base64: string | null };
 type Pointer = { scope: string; publication_id: string; session_date: string; published_at: string };
-type Continuation = { version: 1; policy: "preserve-bootstrap-vix-identity-correction-v1"; migrationId: string;
+type Continuation = { version: 1 | 2; policy: "preserve-bootstrap-vix-identity-correction-v1" | "preserve-bootstrap-vix-sessions-rsho-alias-v2"; migrationId: string;
   fromRevision: string; codeRevision: string; previousPlanHash: string; planHash: string; previousExecutionHash: string;
-  executionHash: string; predecessorAuditHash: string; amendmentHash: string; codeContract: StorageVixCodeContract;
+  executionHash: string; predecessorAuditHash: string; amendmentHash: string; codeContract: StorageVixCodeContract | StorageVixQuarantineCodeContract;
   checkpointManifestHash: string; originalOwner: Checkpoint; eodRunHash: string; featureCheckpointCount: number;
-  featureCheckpointManifestHash: string; vixCheckpoint: { key: string; status: "missing" | "null-refetch-required"; hash: string | null };
+  featureCheckpointManifestHash: string; rshoCheckpoint?: { key: string; status: "missing" | "null-refetch-required"; hash: string | null }; vixCheckpoint: { key: string; status: "missing" | "null-refetch-required"; hash: string | null };
   publicationManifestHash: string; publications: Array<{ pointer: Pointer; rowHash: string }>;
   targetRevision: number; inputClock: number; historyRevision: number;
   physical: { targetBytes: number; historyBytes: number; measuredAt: string }; approvedAt: string; evidenceHash: string };
@@ -54,15 +67,17 @@ export async function loadStorageVixContinuation(ops: D1Database, run: StorageMi
   const text = await read(ops, storageVixContinuationKey(run.id, plan.codeRevision));
   if (!text) return null;
   const record = await verified(parse<Continuation>(text)), execution = await assertStorageExecutionRevision(ops, run, plan.codeRevision);
-  if (record.version !== 1 || record.policy !== "preserve-bootstrap-vix-identity-correction-v1" || record.migrationId !== run.id
-    || record.fromRevision !== STORAGE_VIX_PREVIOUS_REVISION || record.codeRevision !== plan.codeRevision || !execution
+  const policy = record.version === 1 && record.policy === identityPolicy.policy ? identityPolicy
+    : record.version === 2 && record.policy === quarantinePolicy.policy ? quarantinePolicy : null;
+  if (!policy || record.migrationId !== run.id
+    || record.fromRevision !== policy.fromRevision || record.codeRevision !== plan.codeRevision || !execution
     || record.executionHash !== execution.evidenceHash || execution.fromRevision !== record.fromRevision
-    || execution.predecessorHash !== record.previousExecutionHash || !codeSchema.safeParse(record.codeContract).success) fail("execution-mismatch");
+    || execution.predecessorHash !== record.previousExecutionHash || !policy.schema.safeParse(record.codeContract).success) fail("execution-mismatch");
   await verified(record.codeContract);
   if (record.codeContract.codeRevision !== plan.codeRevision || record.codeContract.fromRevision !== record.fromRevision) fail("code-contract-invalid");
   const previousRun = { ...run, execution_revision: record.fromRevision, execution_evidence_hash: record.previousExecutionHash };
   await assertStorageExecutionRevision(ops, previousRun, record.fromRevision);
-  const predecessor = await verified(parse<{ evidenceHash: string }>(await read(ops, storageIndexLoaderContinuationKey(run.id, record.fromRevision))));
+  const predecessor = await verified(parse<{ evidenceHash: string }>(await read(ops, policy.predecessorKey(run.id, record.fromRevision))));
   if (predecessor.evidenceHash !== record.predecessorAuditHash) fail("predecessor-audit-mismatch");
   let selected = plan;
   for (let depth = 0; selected.planHash !== record.planHash; depth++) {
@@ -85,13 +100,24 @@ export async function loadStorageVixContinuation(ops: D1Database, run: StorageMi
   return { previousRun, previousPlan, amendmentHash: record.amendmentHash };
 }
 
-export async function approveStorageVixContinuation(input: { ops: D1Database; source: D1Database; target: D1Database; history: D1Database;
+type ApprovalInput<T extends StorageVixCodeContract | StorageVixQuarantineCodeContract> = { ops: D1Database; source: D1Database; target: D1Database; history: D1Database;
   migrationId: string; fromRevision: string; codeRevision: string; expectedPlanHash: string; changedFiles: string[]; diffHash: string;
-  codeContract: StorageVixCodeContract; assertReviewedCheckout: () => Promise<void>; assertNoWorkflowWriters: () => Promise<void>;
+  codeContract: T; assertReviewedCheckout: () => Promise<void>; assertNoWorkflowWriters: () => Promise<void>;
   measurePhysical: () => Promise<{ targetBytes: number; historyBytes: number; measuredAt: string }>; now?: Date;
-}): Promise<{ execution: StorageExecutionRecord; plan: StoragePopulationPlan; continuation: Continuation }> {
-  const now = input.now ?? new Date(), stamp = now.toISOString(), ops = input.ops, parsed = codeSchema.safeParse(input.codeContract);
-  if (!parsed.success || input.fromRevision !== STORAGE_VIX_PREVIOUS_REVISION || parsed.data.codeRevision !== input.codeRevision
+};
+/** The original v1 entry point retains its exact predecessor and policy. */
+export function approveStorageVixContinuation(input: ApprovalInput<StorageVixCodeContract>) {
+  return approveWithPolicy(input, identityPolicy);
+}
+/** V2 is a separate reviewed correction; it cannot overwrite or reinterpret v1. */
+export function approveStorageVixQuarantineContinuation(input: ApprovalInput<StorageVixQuarantineCodeContract>) {
+  return approveWithPolicy(input, quarantinePolicy);
+}
+async function approveWithPolicy(input: ApprovalInput<StorageVixCodeContract | StorageVixQuarantineCodeContract>, policy: Policy): Promise<{
+  execution: StorageExecutionRecord; plan: StoragePopulationPlan; continuation: Continuation;
+}> {
+  const now = input.now ?? new Date(), stamp = now.toISOString(), ops = input.ops, parsed = policy.schema.safeParse(input.codeContract);
+  if (!parsed.success || input.fromRevision !== policy.fromRevision || parsed.data.codeRevision !== input.codeRevision
     || input.codeRevision === input.fromRevision || !hash.safeParse(input.diffHash).success || !hash.safeParse(input.expectedPlanHash).success
     || !input.changedFiles.includes("worker/src/eod-price-provider.ts")) fail("code-contract-invalid");
   await verified(parsed.data); await input.assertReviewedCheckout(); await input.assertNoWorkflowWriters();
@@ -117,7 +143,7 @@ export async function approveStorageVixContinuation(input: { ops: D1Database; so
   if (!priorExecution) fail("prior-execution-required");
   const { bootstrapInputs: _derived, sizingHash: _size, ...previous } = await loadStorageValidationPlan(ops, run);
   if (previous.planHash !== input.expectedPlanHash) fail("selected-plan-mismatch");
-  const predecessorText = await read(ops, storageIndexLoaderContinuationKey(run.id, input.fromRevision));
+  const predecessorText = await read(ops, policy.predecessorKey(run.id, input.fromRevision));
   const predecessor = await verified(parse<{ evidenceHash: string; originalOwner: Checkpoint }>(predecessorText));
   const amendment = await loadStorageHistoryIndexAmendment(ops, run, previous);
   if (!amendment) fail("original-amendment-missing");
@@ -156,10 +182,30 @@ export async function approveStorageVixContinuation(input: { ops: D1Database; so
     if (!Array.isArray(values)) fail("vix-checkpoint-invalid");
     const matched = values.filter(row => Array.isArray(row) && row[0] === "VIX");
     if (matched.length !== 1 || object(matched[0][1])?.price !== null || object(matched[0][1])?.change1d !== null) fail("vix-checkpoint-not-refetchable");
-    // The code contract preserves runEodBatch byte-for-byte. Its cache reuse
+    // The code contract preserves the cache guard byte-for-byte. Cache reuse
     // requires non-null price AND change1d even on a planned slice. No deletion
     // or artificial input revision is needed to refetch this unusable result.
     vixCheckpoint.status = "null-refetch-required"; vixCheckpoint.hash = await storageHash(vixRow);
+  }
+  let rshoCheckpoint: Continuation["rshoCheckpoint"];
+  if (policy.version === 2) {
+    const rshoIndex = previous.inputs.tickers.indexOf("RSHO");
+    if (rshoIndex < 0 || previous.inputs.tickers.lastIndexOf("RSHO") !== rshoIndex) fail("rsho-not-in-plan");
+    const rshoKey = `features:${Math.floor(rshoIndex / 25)}`, rshoRow = features.find(row => row.chunk_key === rshoKey);
+    rshoCheckpoint = { key: rshoKey, status: "missing", hash: null };
+    if (rshoRow) {
+      const encoded = object(parse(rshoRow.payload_json));
+      if (!encoded) fail("rsho-checkpoint-invalid");
+      const decoded = object(encoded.payloadCodec ? await decodeEodPayload({ payload: "{}", payloadCodec: String(encoded.payloadCodec), payloadBase64: String(encoded.payloadBase64) }) : encoded);
+      const values = decoded?.features;
+      if (!Array.isArray(values)) fail("rsho-checkpoint-invalid");
+      const matched = values.filter(row => Array.isArray(row) && row[0] === "RSHO");
+      if (matched.length !== 1 || object(matched[0][1])?.price !== null || object(matched[0][1])?.change1d !== null) fail("rsho-checkpoint-not-refetchable");
+      // The code contract preserves the cache guard byte-for-byte. Cache reuse
+      // requires non-null price AND change1d even on a planned slice. No deletion
+      // or artificial input revision is needed to refetch this unusable result.
+      rshoCheckpoint.status = "null-refetch-required"; rshoCheckpoint.hash = await storageHash(rshoRow);
+    }
   }
   const publicationSnapshot = async () => {
     const pointers = (await input.target.prepare("SELECT scope,publication_id,session_date,published_at FROM eod_publication_pointers WHERE scope IN (SELECT value FROM json_each(?)) ORDER BY scope")
@@ -173,12 +219,16 @@ export async function approveStorageVixContinuation(input: { ops: D1Database; so
       const payload = await decodeEodPayload({ payload: row.payload_json, payloadCodec: row.payload_codec, payloadBase64: row.payload_base64 });
       if (await storageHash(payload) !== row.payload_checksum) fail("publication-checksum");
       if (row.scope === "overview:default") {
-        const sections = object(payload)?.sections, found: unknown[] = [];
+        const sections = object(payload)?.sections, found: unknown[] = [], rshoFound: unknown[] = [];
         if (!Array.isArray(sections)) fail("overview-payload-invalid");
         for (const section of sections) for (const group of (object(section)?.groups as unknown[] ?? [])) {
-          for (const item of (object(group)?.rows as unknown[] ?? [])) if (object(item)?.ticker === "VIX") found.push(item);
+          for (const item of (object(group)?.rows as unknown[] ?? [])) {
+            if (object(item)?.ticker === "VIX") found.push(item);
+            if (object(item)?.ticker === "RSHO") rshoFound.push(item);
+          }
         }
         if (!found.length || found.some(item => object(item)?.price !== null || object(item)?.change1d !== null)) fail("overview-vix-not-unavailable");
+        if (policy.version === 2 && (!rshoFound.length || rshoFound.some(item => object(item)?.price !== null || object(item)?.change1d !== null))) fail("overview-rsho-not-unavailable");
       }
       values.push({ pointer, rowHash: await storageHash(row) });
     }
@@ -211,11 +261,11 @@ export async function approveStorageVixContinuation(input: { ops: D1Database; so
   const checkpointManifestHash = await storageHash(checkpoints), executionFields = { ...priorExecution, fromRevision: input.fromRevision, codeRevision: input.codeRevision,
     predecessorHash: priorExecution.evidenceHash, checkpointCount: checkpoints.length, checkpointManifestHash, changedFiles: [...input.changedFiles].sort(), diffHash: input.diffHash, approvedAt: stamp };
   const { evidenceHash: _oldExecution, ...unsignedExecution } = executionFields, execution = { ...unsignedExecution, evidenceHash: await storageHash(unsignedExecution) };
-  const fields: Omit<Continuation, "evidenceHash"> = { version: 1, policy: "preserve-bootstrap-vix-identity-correction-v1", migrationId: run.id,
+  const fields: Omit<Continuation, "evidenceHash"> = { version: policy.version, policy: policy.policy, migrationId: run.id,
     fromRevision: input.fromRevision, codeRevision: input.codeRevision, previousPlanHash: previous.planHash, planHash: plan.planHash,
     previousExecutionHash: priorExecution.evidenceHash, executionHash: execution.evidenceHash, predecessorAuditHash: predecessor.evidenceHash,
     amendmentHash: await storageHash(amendment), codeContract: input.codeContract, checkpointManifestHash, originalOwner: owner,
-    eodRunHash: await storageHash(eod), featureCheckpointCount: features.length, featureCheckpointManifestHash: await storageHash(features), vixCheckpoint,
+    eodRunHash: await storageHash(eod), featureCheckpointCount: features.length, featureCheckpointManifestHash: await storageHash(features), vixCheckpoint, ...(rshoCheckpoint ? { rshoCheckpoint } : {}),
     publicationManifestHash: await storageHash(measured.publications), publications: measured.publications, targetRevision: measured.target.revision,
     inputClock: measured.target.inputClock, historyRevision: measured.history.revision, physical, approvedAt: stamp };
   const continuation = { ...fields, evidenceHash: await storageHash(fields) };
@@ -247,7 +297,7 @@ export async function approveStorageVixContinuation(input: { ops: D1Database; so
     THEN 1 ELSE json_extract('storage-vix-continuation-guard-rejected','$') END AS accepted /* eod-population-withdrawal */`, params: [
     run.id, run.updated_at, input.fromRevision, priorExecution.evidenceHash, run.next_attempt_at, JSON.stringify([eod]), eod.id, stamp, stamp,
     `storage-population-current:${run.id}`, pointerText, `storage-population-plan:${run.id}:${previous.planHash}`, previousText,
-    `storage-population-sizing:${previous.planHash}`, sizingText, storageIndexLoaderContinuationKey(run.id, input.fromRevision), predecessorText,
+    `storage-population-sizing:${previous.planHash}`, sizingText, policy.predecessorKey(run.id, input.fromRevision), predecessorText,
     run.id, checkpoints.length, JSON.stringify(checkpoints.map(row => [row.checkpoint_key, row.input_hash, row.payload_json, row.updated_at])), run.id,
     eod.id, features.length, JSON.stringify(features), eod.id, JSON.stringify(records)] }];
   for (const row of records) queries.push({ sql: "INSERT INTO eod_rollout_evidence(id,evidence_json,updated_at) VALUES(?,?,?) ON CONFLICT(id) DO NOTHING", params: [row.id, row.payload, stamp] });

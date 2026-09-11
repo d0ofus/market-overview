@@ -77,6 +77,25 @@ describe("cross-database price repairs against real SQLite", { timeout: 20_000 }
     expect((await loadVerifiedArchivedMarketHistory(env, { tickers: ["AAA"], feed: "yahoo-eod" }))[0].c).toBe(100);
   });
 
+  it.each([false, true])("quarantines VIX-only holiday bars during repair without weakening retained-date completeness: missing=%s", async (missing) => {
+    const vix = (date: string, close: number): EodPriceBar => ({ ...bar(date, close, "yahoo-eod"), ticker: "VIX", reportedVolume: null });
+    await archiveMarketHistoryBars(env, [vix(oldDate, 100)]);
+    await market.db.prepare("UPDATE eod_adjustment_repairs SET status='pending',owner_token='abandoned',updated_at='2020-01-01T00:00:00Z' WHERE feed='yahoo-eod' AND ticker='VIX'").run();
+    const provider = { yahoo: vi.fn(async () => [
+      ...(missing ? [] : [vix(oldDate, 50)]), vix("2026-05-25", 55), vix("2026-09-07", 55), vix(target, 60),
+    ]) } as unknown as EodPriceProvider;
+    if (missing) {
+      await expect(repairEodYahoo(env, provider, "VIX", target, hotStart, [])).rejects.toThrow("adjustment-repair-incomplete");
+      await expect(loadMarketHistory(env, { tickers: ["VIX"], feed: "yahoo-eod" })).rejects.toThrow("adjustment-repair-pending");
+      expect((await loadVerifiedArchivedMarketHistory(env, { tickers: ["VIX"], feed: "yahoo-eod" })).map((row) => row.c)).toEqual([100]);
+    } else {
+      const result = await repairEodYahoo(env, provider, "VIX", target, hotStart, []);
+      expect(result.diagnostic).toBe("yahoo-vix-off-calendar-quarantined:count=2;dates=2026-05-25,2026-09-07");
+      expect((await loadMarketHistory(env, { tickers: ["VIX"], feed: "yahoo-eod" })).map((row) => [row.date, row.c])).toEqual([[oldDate, 50], [target, 60]]);
+      expect(await market.db.prepare("SELECT status FROM eod_adjustment_repairs WHERE feed='yahoo-eod' AND ticker='VIX'").first()).toEqual({ status: "complete" });
+    }
+  });
+
   it("preserves raw volume when writers are disabled but validated readers remain enabled", async () => {
     await writeEodBars(env, [bar(target, 60)]);
     const rollbackEnv = { ...env, EOD_RUNNER_MODE: "disabled", EOD_READ_ENABLED: "true" } as Env;

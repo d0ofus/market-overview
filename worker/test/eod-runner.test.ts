@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSqliteD1 } from "./helpers/sqlite-d1";
 import type { Env } from "../src/types";
-import { EOD_METRICS_VERSION } from "../src/eod-metrics";
+import { EOD_METRICS_VERSION, computeEodTickerMetrics, type EodTickerMetrics } from "../src/eod-metrics";
 import { ProviderBudgetExceededError } from "../src/provider-usage";
 import { decodeEodPayload } from "../src/eod-publication-codec";
 import { archiveMarketHistoryBars, loadMarketHistory } from "../src/market-history";
@@ -11,7 +11,7 @@ const calls=vi.hoisted(() => ({alpaca:vi.fn(),yahoo:vi.fn()}));
 vi.mock("../src/market-calendar-cache",() => ({ensureMarketCalendarCoverage:vi.fn()}));
 vi.mock("../src/eod",() => ({refreshBreadthUniverseMemberships:vi.fn(),loadEodMemberships:vi.fn()}));
 vi.mock("../src/eod-price-provider",async (original) => ({...await original<typeof import("../src/eod-price-provider")>(),EodPriceProvider:class {alpaca=calls.alpaca;yahoo=calls.yahoo;symbolErrors=new Map();}}));
-import { runEodBatch, loadEodInputs } from "../src/eod-runner";
+import { runEodBatch, loadEodInputs, overviewPayload } from "../src/eod-runner";
 import type { FrozenInputs } from "../src/eod-runner";
 
 describe("EOD resumable runner with real publication and lease SQL", {timeout:30_000}, () => {
@@ -78,7 +78,7 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
     expect(calls.yahoo).not.toHaveBeenCalled();
   });
 
-  async function interruptShortHistorySlice(missingCurrent?:"price"|"adjacent",missingSymbol="MISSING0") {
+  async function interruptShortHistorySlice(missingCurrent?:"price"|"adjacent",missingSymbol="MISSING0",historicalEnd?:string) {
     const frozen=JSON.parse((await ops.db.prepare("SELECT input_json FROM eod_runs WHERE id=?")
       .bind(runId).first<string>("input_json"))!) as FrozenInputs;
     if(missingSymbol!=="MISSING0") {
@@ -98,7 +98,8 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
     await ops.db.prepare("UPDATE eod_runs SET input_json=? WHERE id=?").bind(JSON.stringify(sliceInputs),runId).run();
     const prices=async(tickers:string[],start:string,_target:string,adjustment="split")=>tickers.flatMap(ticker=>{
       if(ticker==="MISSING24")return [];
-      return dates.filter(date=>date>=start && (ticker==="SPY" || date>=dates.at(-30)!)
+      return dates.filter(date=>date>=start && (ticker==="SPY" || date>=dates.at(ticker===missingSymbol && historicalEnd ? -260 : -30)!)
+        && !(ticker===missingSymbol && historicalEnd && date>historicalEnd)
         && !(ticker===missingSymbol && ((missingCurrent==="price" && date===session)
           || (missingCurrent==="adjacent" && date===dates.at(-2)))))
         .map(date=>({...makeBar(date),ticker,adjustment}));
@@ -183,6 +184,177 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
     const payload=await decodeEodPayload({payload:current.payload_json,payloadCodec:current.payload_codec,payloadBase64:current.payload_base64}) as typeof oldPayload;
     expect(payload.sections[0].groups[0].rows.find(row=>row.ticker==="VIX")?.price).toBe(22.59);
     expect(await market.db.prepare("SELECT publication_id FROM eod_publication_pointers WHERE scope='overview:default'").first<string>("publication_id")).toBe(after[1].id);
+  },60_000);
+
+  it.each(["alpaca","yahoo"] as const)("refetches logical RSHO after its dated rename using coherent %s history and preserves the earlier Overview",async provider=>{
+    await interruptShortHistorySlice("price","RSHO","2026-06-18");
+    const history=createSqliteD1();
+    try {
+      history.migrate("history-migrations");env={...env,MARKET_HISTORY_DB:history.db};
+      const before=(await market.db.prepare("SELECT * FROM eod_publications WHERE scope='overview:default' AND status='accepted' ORDER BY revision").all()).results;
+      expect(before).toHaveLength(1);
+      const oldCheckpoint=JSON.parse((await ops.db.prepare("SELECT payload_json FROM eod_checkpoints WHERE run_id=? AND chunk_key='features:0'")
+        .bind(runId).first<string>("payload_json"))!);
+      const oldFeatures=await decodeEodPayload({...oldCheckpoint,payload:"{}"}) as {features:Array<[string,EodTickerMetrics]>};
+      expect(oldFeatures.features.find(([ticker])=>ticker==="RSHO")?.[1].price).toBeNull();
+      const primary=calls.alpaca.getMockImplementation()!;
+      if(provider==="alpaca")calls.alpaca.mockImplementation(async(tickers:string[],start:string,target:string,adjustment="split")=>[
+        ...(await primary(tickers.filter(ticker=>ticker!=="RSHO"),start,target,adjustment)),
+        ...(tickers.includes("RSHO") ? dates.filter(date=>date>=start).map(date=>({...makeBar(date,date===session?101:100),ticker:"RSHO",adjustment})) : []),
+      ]);
+      else calls.yahoo.mockImplementation(async(ticker:string)=>{
+        if(ticker!=="RSHO")throw new Error("yahoo-unavailable");
+        return dates.slice(-260).map(date=>({...makeBar(date,date===session?101:100),ticker:"RSHO",feed:"yahoo-eod",sourceProvider:"yahoo",reportedVolume:null}));
+      });
+      expect((await runEodBatch(env,runId,ops.db,{storageInputs:sliceInputs})).status).toBe("retrying");
+      expect(calls.alpaca.mock.calls.some(([tickers])=>tickers.includes("RSHO"))).toBe(true);
+      expect(calls.yahoo.mock.calls.some(([ticker])=>ticker==="RSHO")).toBe(provider==="yahoo");
+      const checkpoint=JSON.parse((await ops.db.prepare("SELECT payload_json FROM eod_checkpoints WHERE run_id=? AND chunk_key='features:0'")
+        .bind(runId).first<string>("payload_json"))!);
+      const features=await decodeEodPayload({...checkpoint,payload:"{}"}) as {features:Array<[string,EodTickerMetrics]>};
+      const rsho=features.features.find(([ticker])=>ticker==="RSHO")![1];
+      expect(rsho).toMatchObject({price:101,sourceProvider:provider,sourceSessions:260});
+      expect(rsho.change1d).toBeCloseTo(1);expect(rsho.sma200).toBeCloseTo(100.005);
+      const retained=await loadMarketHistory(env,{tickers:["RSHO"],feed:provider==="alpaca"?"sip":"yahoo-eod"});
+      expect(retained.map(row=>row.date)).toEqual(dates.slice(-260));
+      expect(retained.every(row=>row.ticker==="RSHO" && row.sourceProvider===provider)).toBe(true);
+      expect(retained.at(-1)?.c).toBe(101);
+      expect(await market.db.prepare("SELECT COUNT(*) AS count FROM alpaca_daily_bars WHERE ticker='WELD'").first()).toEqual({count:0});
+      const after=(await market.db.prepare("SELECT * FROM eod_publications WHERE scope='overview:default' AND status='accepted' ORDER BY revision").all()).results;
+      expect(after).toHaveLength(2);expect(after[0]).toEqual(before[0]);
+      const current=after[1] as unknown as {payload_json:string;payload_codec:string;payload_base64:string|null};
+      const payload=await decodeEodPayload({payload:current.payload_json,payloadCodec:current.payload_codec,payloadBase64:current.payload_base64}) as {
+        sections:Array<{groups:Array<{rows:Array<{ticker:string;price:number|null;quoteSource:string|null;displayName?:string}>}>}>};
+      expect(payload.sections[0].groups[0].rows.find(row=>row.ticker==="RSHO")).toMatchObject({price:101,
+        quoteSource:provider==="alpaca"?"alpaca:sip:split":"yahoo:daily:split",
+        displayName:"WELD (formerly RSHO) - Tema U.S. Manufacturing & Reshoring ETF"});
+      expect(await market.db.prepare("SELECT publication_id FROM eod_publication_pointers WHERE scope='overview:default'").first<string>("publication_id"))
+        .toBe(after[1].id);
+      expect(sliceInputs!.tickers).toContain("RSHO");expect(sliceInputs!.tickers).not.toContain("WELD");
+    } finally {history.dispose();}
+  },90_000);
+
+  it.each([
+    {target:"2026-06-18",available:true}, {target:"2026-06-18",available:false},
+    {target:"2026-06-22",available:true}, {target:"2026-06-22",available:false},
+  ])("dates the RSHO/WELD label accurately for $target with current availability $available",async({target,available})=>{
+    const frozen=JSON.parse((await ops.db.prepare("SELECT input_json FROM eod_runs WHERE id=?").bind(runId).first<string>("input_json"))!) as FrozenInputs;
+    frozen.tickers=["SPY","RSHO"];frozen.calendarDates=["2026-06-17","2026-06-18","2026-06-22"].filter(date=>date<=target);
+    const group=frozen.config.sections[0].groups[0];group.items.push({...group.items[0],ticker:"RSHO",displayName:"RSHO - Tema American Reshoring ETF"});
+    const features=new Map(frozen.tickers.map(ticker=>[ticker,computeEodTickerMetrics({ticker,targetSession:target,calendarDates:frozen.calendarDates,
+      bars:ticker==="RSHO" && !available ? [] : frozen.calendarDates.map(sessionDate=>({ticker,sessionDate,close:100,high:101,low:99,open:100,
+        reportedVolume:100,sourceProvider:"alpaca" as const,priceBasis:"split" as const,sourceFeed:"sip"}))})]));
+    const row=overviewPayload(frozen,features,target).sections[0].groups[0].rows.find(row=>row.ticker==="RSHO")!;
+    expect(row.ticker).toBe("RSHO");expect(frozen.config.sections[0].groups[0].items.at(-1)?.ticker).toBe("RSHO");
+    expect(row.displayName).toBe(target<"2026-06-22" ? "RSHO - Tema American Reshoring ETF" : "WELD (formerly RSHO) - Tema U.S. Manufacturing & Reshoring ETF");
+    if(target==="2026-06-22") {
+      expect(row.barFreshnessReason).toContain("trades as WELD from 2026-06-22");
+      expect(row.barFreshnessReason).toContain("https://temaetfs.com/rsho-landing-page");
+    } else expect(row.barFreshnessReason).not.toContain("WELD");
+    expect(row.price).toBe(available?100:null);expect(row.barDate).toBe(available?target:null);
+    expect(row.currentData?.status).toBe(available?"fresh":"unavailable");
+    if(!available) {
+      expect(row.quoteSource).toBeNull();expect(row.barFreshnessReason).toContain("No verified EOD price");
+      expect(row.barFreshnessReason).not.toContain("EOD close from");
+    }
+  });
+
+  async function prepareIndexCalendar(ticker="VIX") {
+    const target="2026-09-10",holidays=new Set([
+      "2025-01-01","2025-01-09","2025-01-20","2025-02-17","2025-04-18","2025-05-26",
+      "2025-06-19","2025-07-04","2025-09-01","2025-11-27","2025-12-25",
+      "2026-01-01","2026-01-19","2026-02-16","2026-04-03","2026-05-25","2026-06-19","2026-07-03","2026-09-07",
+    ]),calendar:string[]=[];
+    for(const day=new Date(`${target}T00:00:00Z`);calendar.length<400;day.setUTCDate(day.getUTCDate()-1)) {
+      const date=day.toISOString().slice(0,10);
+      if(day.getUTCDay()!==0 && day.getUTCDay()!==6 && !holidays.has(date))calendar.unshift(date);
+    }
+    const frozen=JSON.parse((await ops.db.prepare("SELECT input_json FROM eod_runs WHERE id=?")
+      .bind(runId).first<string>("input_json"))!) as FrozenInputs;
+    frozen.calendarDates=calendar;frozen.tickers=["SPY",ticker];
+    const group=frozen.config.sections[0].groups[0];
+    group.items.push({...group.items[0],ticker,displayName:ticker});
+    frozen.memberships=frozen.memberships.map(row=>({...row,sourceAsOfDate:target,verifiedAt:`${target}T20:00:00Z`,members:["SPY",ticker]}));
+    await market.db.batch([
+      market.db.prepare("DELETE FROM market_calendar_sessions"),
+      market.db.prepare("INSERT INTO market_calendar_sessions(session_date,open_at,close_at,source) SELECT value,'09:30','16:00','test' FROM json_each(?)").bind(JSON.stringify(calendar)),
+      market.db.prepare("DELETE FROM alpaca_daily_bars"),
+      market.db.prepare(`INSERT INTO alpaca_daily_bars(feed,ticker,date,o,h,l,c,volume,reported_volume)
+        SELECT 'sip','SPY',value,100,101,99,100,100,100 FROM json_each(?)`).bind(JSON.stringify(calendar.slice(-260))),
+    ]);
+    await ops.db.prepare("UPDATE eod_runs SET session_date=?,input_json=? WHERE id=?").bind(target,JSON.stringify(frozen),runId).run();
+    calls.alpaca.mockImplementation(async(tickers:string[],start:string,_target:string,adjustment="split")=>
+      tickers.includes("SPY") ? calendar.filter(date=>date>=start).map(date=>({...makeBar(date),adjustment})) : []);
+    const yahooBars=calendar.slice(-260).map((date,index)=>({...makeBar(date,20+index/100),ticker,
+      feed:"yahoo-eod",sourceProvider:"yahoo",reportedVolume:null}));
+    const extras=["2026-05-25","2026-09-07"].map(date=>({...makeBar(date,999),ticker,
+      feed:"yahoo-eod",sourceProvider:"yahoo",reportedVolume:null}));
+    const checkpoint=async()=>{
+      const stored=JSON.parse((await ops.db.prepare("SELECT payload_json FROM eod_checkpoints WHERE run_id=? AND chunk_key='features:0'")
+        .bind(runId).first<string>("payload_json"))!);
+      return await decodeEodPayload({...stored,payload:"{}"}) as {features:Array<[string,EodTickerMetrics]>;errors:Record<string,string>};
+    };
+    return {target,calendar,yahooBars,extras,checkpoint};
+  }
+
+  it("quarantines VIX holiday observations before archiving and corrects the same-session Overview without rewriting its previous revision",async()=>{
+    const history=createSqliteD1();
+    try {
+      history.migrate("history-migrations");env={...env,MARKET_HISTORY_DB:history.db};
+      const f=await prepareIndexCalendar();
+      expect((await runEodBatch(env,runId)).status).toBe("retrying");
+      const before=(await market.db.prepare("SELECT * FROM eod_publications WHERE scope='overview:default' AND status='accepted' ORDER BY revision").all()).results;
+      expect(before).toHaveLength(1);
+      expect((await f.checkpoint()).features.find(([ticker])=>ticker==="VIX")?.[1].price).toBeNull();
+      calls.yahoo.mockResolvedValue([...f.yahooBars,...f.extras].sort((a,b)=>a.date.localeCompare(b.date)));
+      expect((await runEodBatch(env,runId)).status).toBe("completed");
+      const retained=await loadMarketHistory(env,{tickers:["VIX"],feed:"yahoo-eod"});
+      expect(retained.map(row=>row.date)).toEqual(f.calendar.slice(-260));
+      expect(retained).toHaveLength(260);expect(retained.every(row=>row.c<100 && row.reportedVolume===null)).toBe(true);
+      expect(await market.db.prepare("SELECT COUNT(*) AS count FROM alpaca_daily_bars WHERE ticker='VIX'").first()).toEqual({count:0});
+      const checkpoint=await f.checkpoint(),vix=checkpoint.features.find(([ticker])=>ticker==="VIX")![1];
+      expect(vix.price).toBe(22.59);expect(vix.change1d).toBeCloseTo((22.59/22.58-1)*100);
+      expect(vix.sma200).toBeCloseTo(21.595);expect(vix.pctFrom52wHigh).toBeCloseTo((22.59/23.59-1)*100);
+      const yearAnchor=f.yahooBars.filter(row=>row.date<"2026-01-01").at(-1)!;
+      expect(vix.ytd).toBeCloseTo((22.59/yearAnchor.c-1)*100);
+      expect(vix.sourceSessions).toBe(260);expect(vix.sourceProvider).toBe("yahoo");
+      expect(checkpoint.errors.VIX).toBe("yahoo-vix-off-calendar-quarantined:count=2;dates=2026-05-25,2026-09-07");
+      const progress=JSON.parse((await ops.db.prepare("SELECT progress_json FROM eod_runs WHERE id=?").bind(runId).first<string>("progress_json"))!);
+      expect(progress.errors.VIX).toBe(checkpoint.errors.VIX);
+      const after=(await market.db.prepare("SELECT * FROM eod_publications WHERE scope='overview:default' AND status='accepted' ORDER BY revision").all()).results;
+      expect(after).toHaveLength(2);expect(after[0]).toEqual(before[0]);
+      const current=after[1] as unknown as {payload_json:string;payload_codec:string;payload_base64:string|null};
+      const payload=await decodeEodPayload({payload:current.payload_json,payloadCodec:current.payload_codec,payloadBase64:current.payload_base64}) as {
+        sections:Array<{groups:Array<{rows:Array<{ticker:string;price:number|null;change1d:number|null;unavailableReason:string|null}>}>}>};
+      const currentRow=payload.sections[0].groups[0].rows.find(row=>row.ticker==="VIX")!;
+      expect(currentRow).toMatchObject({price:22.59,change1d:vix.change1d});
+      expect(currentRow.unavailableReason ?? null).toBeNull();
+      expect(await market.db.prepare("SELECT publication_id FROM eod_publication_pointers WHERE scope='overview:default'").first<string>("publication_id"))
+        .toBe(after[1].id);
+    } finally {history.dispose();}
+  },90_000);
+
+  it.each(["target","adjacent","63-session","other-index"] as const)("does not manufacture an index metric when the Yahoo window has a missing %s",async missing=>{
+    const history=createSqliteD1();
+    try {
+      history.migrate("history-migrations");env={...env,MARKET_HISTORY_DB:history.db};
+      const ticker=missing==="other-index" ? "XAU" : "VIX",f=await prepareIndexCalendar(ticker);
+      const omitted=missing==="target" ? f.target : missing==="adjacent" ? f.calendar.at(-2) : missing==="63-session" ? f.calendar.at(-64) : null;
+      calls.yahoo.mockResolvedValue([...f.yahooBars.filter(row=>row.date!==omitted),...f.extras].sort((a,b)=>a.date.localeCompare(b.date)));
+      await runEodBatch(env,runId);
+      const checkpoint=await f.checkpoint(),metric=checkpoint.features.find(([symbol])=>symbol===ticker)![1];
+      const retained=await loadMarketHistory(env,{tickers:[ticker],feed:"yahoo-eod"});
+      if(missing==="other-index") {
+        expect(retained).toEqual([]);expect(metric.price).toBeNull();expect(metric.change1d).toBeNull();
+        expect(checkpoint.errors.XAU).toBe("yahoo-unexpected-exchange-session");
+      } else {
+        expect(retained.map(row=>row.date)).toEqual(f.calendar.slice(-260).filter(date=>date!==omitted));
+        expect(checkpoint.errors.VIX).toBe("yahoo-vix-off-calendar-quarantined:count=2;dates=2026-05-25,2026-09-07");
+        if(missing==="target")expect(metric.price).toBeNull();else expect(metric.price).toBe(22.59);
+        if(missing==="target" || missing==="adjacent")expect(metric.change1d).toBeNull();
+        if(missing==="63-session")expect(metric.change3m).toBeNull();
+      }
+    } finally {history.dispose();}
   },60_000);
 
   it("requires approved storage inputs for planned slice checkpoint reuse",async()=>{

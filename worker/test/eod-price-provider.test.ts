@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { EodPriceProvider, yahooEodSymbol, yahooWindowMatchesAlpaca, type EodPriceBar } from "../src/eod-price-provider";
+import { EodPriceProvider, selectYahooEodSessions, yahooEodSymbol, yahooWindowMatchesAlpaca, type EodPriceBar } from "../src/eod-price-provider";
 import { meteredFetch,ProviderBudgetExceededError } from "../src/provider-usage";
+import { reviewedEodTickerAlias } from "../src/eod-ticker-aliases";
 import type { Env } from "../src/types";
 
 vi.mock("../src/provider-usage", async (original) => ({...await original<typeof import("../src/provider-usage")>(),meteredFetch:vi.fn()}));
@@ -35,6 +36,45 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe("EOD Alpaca provider boundaries and isolation", () => {
+  it("keeps the verified rename dated and leaves unrelated symbols and earlier sessions unchanged", () => {
+    expect(reviewedEodTickerAlias("RSHO", "2026-06-18")).toBeNull();
+    expect(reviewedEodTickerAlias("RSHO", "2026-06-21")).toBeNull();
+    expect(reviewedEodTickerAlias("WELD", "2026-09-10")).toBeNull();
+    expect(reviewedEodTickerAlias("SPY", "2026-09-10")).toBeNull();
+    expect(reviewedEodTickerAlias("RSHO", "2026-06-22")).toEqual({ currentSymbol: "WELD", effectiveDate: "2026-06-22",
+      asofDate: "2026-06-18", sourceUrl: "https://temaetfs.com/rsho-landing-page", name: "Tema U.S. Manufacturing & Reshoring ETF" });
+    expect(yahooEodSymbol("RSHO")).toBe("RSHO");
+    expect(yahooEodSymbol("RSHO", "2026-06-18")).toBe("RSHO");
+    expect(yahooEodSymbol("RSHO", "2026-06-22")).toBe("WELD");
+    expect(yahooEodSymbol("BRK.B", "2026-09-10")).toBe("BRK-B");
+  });
+
+  it.each(["split", "raw"] as const)("isolates post-rename RSHO asof without remapping ordinary symbols or duplicating raw/split rows: %s", async (adjustment) => {
+    request.mockResolvedValueOnce(page({ AAA: [price("2026-06-22T04:00:00Z")], BBB: [price("2026-06-22T04:00:00Z")] }))
+      .mockResolvedValueOnce(page({ RSHO: [price("2026-06-18T04:00:00Z")] }, "renamed-next"))
+      .mockResolvedValueOnce(page({ RSHO: [price("2026-06-22T04:00:00Z")] }));
+    const bars = await complete(new EodPriceProvider(env).alpaca(["AAA", "RSHO", "BBB", "RSHO"], "2026-06-18", "2026-06-22", adjustment));
+    const params = request.mock.calls.map((call) => new URL(String(call[1])).searchParams);
+    expect(params.map((query) => [query.get("symbols"), query.get("asof"), query.get("adjustment"), query.get("page_token")])).toEqual([
+      ["AAA,BBB", "2026-06-22", adjustment, null], ["RSHO", "2026-06-18", adjustment, null], ["RSHO", "2026-06-18", adjustment, "renamed-next"],
+    ]);
+    expect(bars.map((bar) => `${bar.ticker}:${bar.date}`)).toEqual(["AAA:2026-06-22", "BBB:2026-06-22", "RSHO:2026-06-18", "RSHO:2026-06-22"]);
+    expect(bars.every((bar) => bar.feed === "sip" && bar.sourceProvider === "alpaca" && bar.adjustment === adjustment)).toBe(true);
+    expect(bars.every((bar) => bar.reportedVolume === (adjustment === "raw" ? 1000 : null))).toBe(true);
+    expect(params.every((query) => query.get("start") === "2026-06-18T00:00:00.000Z")).toBe(true);
+  });
+
+  it("keeps pre-rename RSHO in the ordinary target-asof batch and rejects unexpected successor response keys", async () => {
+    request.mockResolvedValueOnce(page({ AAA: [price("2026-06-18T04:00:00Z")], RSHO: [price("2026-06-18T04:00:00Z")] }));
+    expect(await complete(new EodPriceProvider(env).alpaca(["AAA", "RSHO"], "2026-06-18", "2026-06-18"))).toHaveLength(2);
+    expect(request).toHaveBeenCalledTimes(1);
+    const query = new URL(String(request.mock.calls[0]![1])).searchParams;
+    expect(query.get("symbols")).toBe("AAA,RSHO");
+    expect(query.get("asof")).toBe("2026-06-18");
+    request.mockReset().mockResolvedValueOnce(page({ WELD: [price("2026-06-22T04:00:00Z")] }));
+    await expect(complete(new EodPriceProvider(env).alpaca(["RSHO"], "2026-06-18", "2026-06-22"))).rejects.toThrow("alpaca-symbol-mismatch");
+  });
+
   it("keeps liquidated funds out of current requests while retaining the configured identity", async () => {
     request.mockResolvedValueOnce(page({ AAA: [price()] }));
     const provider = new EodPriceProvider(env);
@@ -216,6 +256,38 @@ describe("EOD Yahoo identity and price basis", () => {
   const vixMetadata = { symbol: "^VIX", exchangeTimezoneName: "America/Chicago", instrumentType: "INDEX", currency: "USD",
     shortName: "CBOE Volatility Index", longName: "CBOE Volatility Index" };
   const vixTimestamps = ["2026-09-09T07:00:00.000Z", "2026-09-10T07:00:00.000Z"];
+  const weldMeta = { symbol: "WELD", instrumentType: "ETF", currency: "USD", exchangeTimezoneName: "America/New_York",
+    shortName: "Tema U.S. Manufacturing & Reshoring ETF" };
+  const reshoringDates = ["2026-06-18T13:30:00Z", "2026-06-22T13:30:00Z"];
+  const reshoringOverlap = (): EodPriceBar[] => reshoringDates.map((date) => ({ ...sipOverlap()[0]!, ticker: "RSHO", date: date.slice(0, 10) }));
+
+  it("maps only dated RSHO fallback to verified WELD while preserving logical history and overlap validation", async () => {
+    request.mockResolvedValueOnce(yahooPayload(weldMeta, reshoringDates));
+    const bars = await complete(new EodPriceProvider(env).yahoo("RSHO", "2026-06-18", "2026-06-22", reshoringOverlap()));
+    expect(new URL(String(request.mock.calls[0]![1])).pathname).toBe("/v8/finance/chart/WELD");
+    expect(bars.map((bar) => [bar.ticker, bar.date, bar.sourceProvider, bar.reportedVolume])).toEqual([
+      ["RSHO", "2026-06-18", "yahoo", null], ["RSHO", "2026-06-22", "yahoo", null],
+    ]);
+    expect(yahooWindowMatchesAlpaca("RSHO", bars, reshoringOverlap())).toBe(true);
+  });
+
+  it.each([
+    { symbol: "RSHO" }, { instrumentType: "EQUITY" }, { currency: "CAD" }, { exchangeTimezoneName: "America/Chicago" },
+    { shortName: "Unrelated Manufacturing ETF" }, { shortName: "Tema Manufacturing Technology ETF" },
+  ])("rejects incompatible post-rename same-fund metadata %#", async (override) => {
+    request.mockResolvedValueOnce(yahooPayload({ ...weldMeta, ...override }, reshoringDates));
+    await expect(complete(new EodPriceProvider(env).yahoo("RSHO", "2026-06-18", "2026-06-22", reshoringOverlap())))
+      .rejects.toThrow("yahoo-instrument-identity-unverified");
+  });
+
+  it("does not let a verified rename bypass insufficient or incompatible split-basis overlaps", async () => {
+    request.mockResolvedValueOnce(yahooPayload(weldMeta, reshoringDates));
+    await expect(complete(new EodPriceProvider(env).yahoo("RSHO", "2026-06-18", "2026-06-22", reshoringOverlap().slice(0, 1))))
+      .rejects.toThrow("yahoo-price-basis-unverified");
+    request.mockResolvedValueOnce(yahooPayload(weldMeta, reshoringDates));
+    await expect(complete(new EodPriceProvider(env).yahoo("RSHO", "2026-06-18", "2026-06-22", reshoringOverlap().map((bar) => ({ ...bar, c: 50 })))))
+      .rejects.toThrow("yahoo-price-basis-unverified");
+  });
 
   it("accepts reviewed VIX Chicago metadata while retaining NY session dates and Yahoo volume provenance", async () => {
     vi.setSystemTime(new Date("2026-09-11T14:09:15Z"));
@@ -231,6 +303,20 @@ describe("EOD Yahoo identity and price basis", () => {
         reportedVolume: null, sourceProvider: "yahoo", feed: "yahoo-eod", adjustment: "split" })),
     );
     expect(decodeURIComponent(new URL(String(request.mock.calls[0]![1])).pathname)).toBe("/v8/finance/chart/^VIX");
+  });
+
+  it("quarantines the two observed VIX holiday sessions after strict metadata validation", async () => {
+    // Sanitized timestamps from the admitted full-window 2026-09-11 probe.
+    // Numeric OHLCV remains synthetic; the frozen equity grid excludes both.
+    const timestamps = ["2026-05-22T07:00:00Z", "2026-05-25T07:00:00Z", "2026-09-07T07:00:00Z", ...vixTimestamps];
+    request.mockResolvedValueOnce(yahooPayload(vixMetadata, timestamps));
+    const fetched = await complete(new EodPriceProvider(env).yahoo("VIX", "2026-05-22", "2026-09-10", []));
+    const selected = selectYahooEodSessions("VIX", fetched, ["2026-05-22", "2026-09-09", "2026-09-10"]);
+    expect(selected.bars.map((bar) => bar.date)).toEqual(["2026-05-22", "2026-09-09", "2026-09-10"]);
+    expect(selected.diagnostic).toBe("yahoo-vix-off-calendar-quarantined:count=2;dates=2026-05-25,2026-09-07");
+    expect(fetched).toHaveLength(5);
+    expect(selected.bars.every((bar) => fetched.includes(bar) && bar.c === 100 && bar.reportedVolume === null)).toBe(true);
+    expect(request).toHaveBeenCalledTimes(1);
   });
 
   it.each([
@@ -313,5 +399,58 @@ describe("EOD Yahoo identity and price basis", () => {
     request.mockResolvedValueOnce(Response.json(body));
     await expect(complete(new EodPriceProvider(env).yahoo("AAA","2026-09-04","2026-09-08",sipOverlap())))
       .rejects.toThrow("yahoo-price-basis-unverified");
+  });
+});
+
+describe("VIX-only authoritative session selection", () => {
+  const bar = (date: string, ticker = "VIX"): EodPriceBar => ({
+    ticker, date, o: 100, h: 101, l: 99, c: 100, volume: 999, reportedVolume: null,
+    sourceProvider: "yahoo", feed: "yahoo-eod", adjustment: "split", fetchedAt: "2026-09-11T15:00:00Z", observedAt: null,
+  });
+  const calendar = ["2026-09-04", "2026-09-08", "2026-09-09", "2026-09-10"];
+
+  it("preserves an already valid window without cloning or redating its observations", () => {
+    const bars = calendar.map((date) => bar(date));
+    const selected = selectYahooEodSessions("VIX", bars, calendar);
+    expect(selected.bars).toBe(bars);
+    expect(selected.diagnostic).toBeNull();
+  });
+
+  it.each(["XOI", "XAU", "XNG", "OSX", "BKX", "INSR", "AAA", "SPY"])("still rejects an entire off-calendar window for %s", (ticker) => {
+    expect(() => selectYahooEodSessions(ticker, [bar("2026-09-07", ticker), bar("2026-09-10", ticker)], calendar))
+      .toThrow("yahoo-unexpected-exchange-session");
+  });
+
+  it.each([
+    { ticker: "VVIX" }, { sourceProvider: "alpaca" }, { feed: "sip" }, { adjustment: "raw" },
+  ])("does not conceal incompatible VIX-window identity or provenance %#", (override) => {
+    expect(() => selectYahooEodSessions("VIX", [bar("2026-09-07"), { ...bar("2026-09-10"), ...override }], calendar))
+      .toThrow("yahoo-instrument-identity-unverified");
+  });
+
+  it("does not shift or invent a missing target or adjacent-session anchor", () => {
+    for (const missing of ["2026-09-09", "2026-09-10"]) {
+      const dates = calendar.filter((date) => date !== missing);
+      const selected = selectYahooEodSessions("VIX", [...dates.map((date) => bar(date)), bar("2026-09-07")], calendar);
+      expect(selected.bars.map((row) => row.date)).toEqual(dates);
+      expect(selected.bars.some((row) => row.date === missing)).toBe(false);
+    }
+  });
+
+  it("bounds diagnostic dates while counting every quarantined observation", () => {
+    const extra = Array.from({ length: 20 }, (_, index) => bar(`2026-05-${String(index + 1).padStart(2, "0")}`));
+    const selected = selectYahooEodSessions("VIX", [...extra, bar("2026-09-10")], calendar);
+    expect(selected.bars.map((row) => row.date)).toEqual(["2026-09-10"]);
+    expect(selected.diagnostic).toContain("count=20;dates=2026-05-01,");
+    expect(selected.diagnostic).toContain("2026-05-12;dates-truncated");
+    expect(selected.diagnostic).not.toContain("2026-05-13");
+    expect(selected.diagnostic!.length).toBeLessThan(250);
+  });
+
+  it("fails closed for an unavailable calendar, invalid observation, or future session", () => {
+    expect(() => selectYahooEodSessions("VIX", [bar("2026-09-07")], [])).toThrow("yahoo-unexpected-exchange-session");
+    for (const invalid of [{ ...bar("2026-09-07"), c: 0 }, bar("2026-09-11")]) {
+      expect(() => selectYahooEodSessions("VIX", [invalid, bar("2026-09-10")], calendar)).toThrow("yahoo-unexpected-exchange-session");
+    }
   });
 });
