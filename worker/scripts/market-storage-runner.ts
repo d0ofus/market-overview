@@ -5,7 +5,8 @@ import { createEodAdmission, createEodD1Database } from "../src/eod-d1-rest";
 import { reconcileEodAccountUsage } from "../src/eod-account-usage";
 import { claimStorageMigration, createStorageMigration, deferStorageMigration, loadStorageMigration,
   pauseStorageMigration, resumeStorageMigration, authorizeStorageMigrationFreeze, storageMigrationIdentity,
-  loadStorageMigrationCheckpoint, markStorageMigrationReady, completeStorageMigration, storageExecutionIdentity } from "../src/market-storage-control";
+  loadStorageMigrationCheckpoint, markStorageMigrationReady, completeStorageMigration, storageExecutionIdentity,
+  yieldStorageMigration } from "../src/market-storage-control";
 import { assertStorageExecutionRevision } from "../src/market-storage-execution";
 import { STORAGE_BUSINESS_DDL, STORAGE_TARGET_DDL, type StorageCopyProgress } from "../src/market-storage-copy";
 import { classifyStorageFailure } from "../src/market-storage-failure";
@@ -292,6 +293,12 @@ async function main():Promise<void> {
       await collectEodRolloutMonitoring(env).catch(()=>undefined);
     } catch (error:unknown) {
       const failure=classifyStorageFailure(error);
+      if (failure.code==="storage-run-time-slice-complete" || failure.code==="storage-verification-time-slice-complete") {
+        await yieldStorageMigration(failureDb,id,claimed.leaseToken);
+        console.log(JSON.stringify({id,status:"queued",reason:failure.code,
+          ...(copyProgress ? {lastCompletedCheckpoint:copyProgress} : {})}));
+        return;
+      }
       if (failure.retryable) await deferStorageMigration(failureDb,id,claimed.leaseToken,failure.code,{quota:failure.quota});
       else await pauseStorageMigration(failureDb,id,claimed.leaseToken,
         failure.code,{sourcePreserved:true,...(copyProgress ? {copyProgress} : {})});

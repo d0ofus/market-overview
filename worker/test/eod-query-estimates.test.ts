@@ -14,11 +14,11 @@ describe("full-population fixed query admission",{timeout:30_000},() => {
   it("admits the bounded atomic cold membership transaction including index writes",async () => {
     db=createSqliteD1();db.migrate("ops-migrations");
     const queries=promotion(0,6000);
-    expect(estimateEodQueries(queries)).toEqual({reads:36160,writes:18040});
+    expect(estimateEodQueries(queries)).toEqual({reads:48320,writes:24080});
     const admission=createEodAdmission(db.db,"cold-membership",{now:() => new Date("2026-09-08T20:30:00Z")});
     const settle=await admission(queries);
-    await settle({rowsRead:30_000,rowsWritten:18_020,sizeAfter:100_000_000});await admission.flush();
-    expect(await db.db.prepare("SELECT rows_written FROM eod_usage").first()).toEqual({rows_written:18_032});
+    await settle({rowsRead:30_000,rowsWritten:24_020,sizeAfter:100_000_000});await admission.flush();
+    expect(await db.db.prepare("SELECT rows_written FROM eod_usage").first()).toEqual({rows_written:24_032});
   });
   it("does not grant the larger envelope to arbitrary or oversized mutations",async () => {
     db=createSqliteD1();db.migrate("ops-migrations");

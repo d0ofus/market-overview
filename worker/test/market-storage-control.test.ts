@@ -3,7 +3,7 @@ import { createSqliteD1 } from "./helpers/sqlite-d1";
 import { abortStorageMigration,authorizeStorageMigrationFreeze,claimStorageMigration,createStorageMigration,deferStorageMigration,
   heartbeatStorageMigration,loadStorageMigration,loadStorageMigrationCheckpoint,markStorageMigrationReady,pauseStorageMigration,
   recordStorageSourceCapture,resumeStorageMigration,saveStorageMigrationCheckpoint,storageMigrationBlocksEod,queueStorageMigrationStage,
-  type StorageMigrationIdentity } from "../src/market-storage-control";
+  yieldStorageMigration,progressStorageMigration,type StorageMigrationIdentity } from "../src/market-storage-control";
 import { assertStorageSourceFrozen,assertStorageTargetEmpty,freezeStorageSource,prepareStorageSourceFence,releaseStorageSourceFence } from "../src/market-storage-fence";
 import { coordinateStorageMigration } from "../src/market-storage-scheduler";
 import { coordinateEod,dispatchEodRun,eodStatus,type EodRun } from "../src/eod-coordinator";
@@ -65,6 +65,28 @@ describe("durable market storage migration controls and source fencing",{timeout
     await expect(queueStorageMigrationStage(ops.db,identity.id,claimed.leaseToken,"wrong",{},now)).rejects.toThrow("lease-lost");
     const next=(await claimStorageMigration(ops.db,identity.id,{now}))!;
     expect(next.leaseToken).not.toBe(claimed.leaseToken);
+  });
+  it("queues a normal processing slice with its exact progress intact and no retry delay",async () => {
+    const owner=(await claimStorageMigration(ops.db,identity.id,{now}))!;
+    await progressStorageMigration(ops.db,identity.id,owner.leaseToken,"verification-prices",{rows:1234,after:"MSFT"},now);
+    await saveStorageMigrationCheckpoint(ops.db,identity.id,owner.leaseToken,
+      {key:"verify:prices",inputHash:"b".repeat(64),payload:{rows:1234}},now);
+    const before=await run();
+    await expect(yieldStorageMigration(ops.db,identity.id,"wrong-token",now)).rejects.toThrow("lease-lost");
+    expect(await run()).toEqual(before);
+    await yieldStorageMigration(ops.db,identity.id,owner.leaseToken,now);
+    expect(await run()).toMatchObject({status:"queued",stage:before!.stage,progress_json:before!.progress_json,
+      lease_token:null,lease_until:null,next_attempt_at:now.toISOString(),error_code:null});
+    expect(await loadStorageMigrationCheckpoint(ops.db,identity.id,"verify:prices")).toMatchObject({payload:{rows:1234}});
+    await expect(yieldStorageMigration(ops.db,identity.id,owner.leaseToken,now)).rejects.toThrow("lease-lost");
+    expect(await claimStorageMigration(ops.db,identity.id,{now})).not.toBeNull();
+  });
+  it("does not let an expired processing slice release a lease or change progress",async () => {
+    const owner=(await claimStorageMigration(ops.db,identity.id,{now}))!;
+    await progressStorageMigration(ops.db,identity.id,owner.leaseToken,"verification-prices",{rows:1234},now);
+    const before=await run();
+    await expect(yieldStorageMigration(ops.db,identity.id,owner.leaseToken,later)).rejects.toThrow("lease-lost");
+    expect(await run()).toEqual(before);
   });
   it("persists capture and progress across quota resets while leaving the source frozen",async () => {
     const plan=await install();

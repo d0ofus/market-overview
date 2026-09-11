@@ -161,6 +161,15 @@ export async function queueStorageMigrationStage(ops:D1Database,id:string,token:
     .bind(stage,boundedJson(progress),now.toISOString(),now.toISOString(),id,token,now.toISOString()).run();
   if (!result.meta.changes) throw new Error("storage-migration-lease-lost");
 }
+/** A bounded processing slice is successful checkpointed work. Preserve its
+ * exact stage/progress and release only the healthy owner for automatic resume. */
+export async function yieldStorageMigration(ops:D1Database,id:string,token:string,now=new Date()):Promise<void> {
+  const result=await ops.prepare(`UPDATE market_storage_migrations SET status='queued',
+    next_attempt_at=?,error_code=NULL,lease_token=NULL,lease_until=NULL,updated_at=?
+    WHERE id=? AND lease_token=? AND status='running' AND lease_until>?`)
+    .bind(now.toISOString(),now.toISOString(),id,token,now.toISOString()).run();
+  if (!result.meta.changes) throw new Error("storage-migration-lease-lost");
+}
 /** Stops resumption before releasing the source. Interrupted aborts remain in
  * 'aborting' and can be replayed; a live copy lease or activated target forbids it. */
 export async function abortStorageMigration(ops:D1Database,source:D1Database,id:string,

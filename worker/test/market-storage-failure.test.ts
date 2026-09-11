@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import { classifyStorageFailure } from "../src/market-storage-failure";
 
 describe("sanitized storage interruption diagnostics", () => {
+  it("identifies underestimated billed work without exposing query diagnostics or treating it as exhausted quota", () => {
+    expect(classifyStorageFailure(new Error("eod-d1-query-budget-estimate-exceeded; reads=1600/2432; writes=1600/1208; statements=1; classes=universe-stage; private token")))
+      .toEqual({code:"storage-query-estimate-exceeded",retryable:false,quota:false});
+  });
   it.each(["d1-request-timeout","d1-network-error","storage-run-time-slice-complete"])("retains actionable %s", (code) => {
     expect(classifyStorageFailure(new Error(code))).toEqual({code,retryable:true,quota:false});
   });

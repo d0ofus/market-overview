@@ -10,6 +10,9 @@ export type StorageFailure = {
  * response bodies, credentials, or arbitrary nested Error text in public logs. */
 export function classifyStorageFailure(error:unknown):StorageFailure {
   const message=error instanceof Error ? error.message : "";
+  if (/^eod-d1-query-budget-estimate-exceeded(?:;|$)/.test(message)) {
+    return {code:"storage-query-estimate-exceeded",retryable:false,quota:false};
+  }
   const quota=/\b(?:[a-z0-9-]*budget-exhausted|[a-z0-9-]*quota-exhausted)\b/.test(message);
   if (quota) return {code:"storage-quota-deferred",retryable:true,quota:true};
   if (/\b(?:d1-capacity-exhausted|eod-capacity-exceeded)\b/.test(message)) {

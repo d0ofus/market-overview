@@ -214,11 +214,12 @@ function maximumReservationWrites(queries:readonly EodSql[]):number {
     return 200_000;
   }
   // Only the known five-statement atomic membership promotion may need a
-  // larger envelope (cold bootstrap has two indexes plus its table rows).
+  // larger envelope. Include table, both member indexes and the per-row
+  // capture revision, plus pointer/status work and the Paid ledger allowance.
   if (queries.length!==5 || !MEMBERSHIP_MARKERS.every((marker,index) =>
     queries[index].sql.trimEnd().endsWith(`/* eod-universe-promote-${marker} */`))) return 10_000;
   if (membershipRows(queries[0],8_000)+membershipRows(queries[1],8_000)>8_000) throw new Error("eod-universe-promotion-too-large");
-  return 25_000;
+  return 33_000;
 }
 
 /** Fixed labels make live estimate failures diagnosable without logging SQL,
@@ -310,11 +311,17 @@ export function estimateEodQueries(queries: readonly EodSql[]): { reads: number;
     }
     if (/\/\* eod-universe-(stage|prune-members|promote-delete|promote-insert) \*\/$/.test(query.sql.trimEnd())) {
       const rows=membershipRows(query,/promote-/.test(query.sql) ? 8_000 : 400);
-      reads+=6*rows+32; writes+=3*rows+8;
+      // Rowid membership tables have a PK autoindex and reverse ticker index.
+      // An open migration capture also updates its singleton on every affected
+      // row: live 400-row staging therefore bills 1,600 writes, not 1,200.
+      // Reserve JSON traversal, key probes and guard/selection reads as well.
+      reads+=8*rows+64; writes+=4*rows+16;
       continue;
     }
     if (/\/\* eod-universe-promote-(pointer|active|supersede) \*\/$/.test(query.sql.trimEnd())) {
-      reads+=32;writes+=8;continue;
+      // Exact one-row pointer/status changes; allow indexed status replacement
+      // and capture-trigger work independently of the member delta reservation.
+      reads+=64;writes+=16;continue;
     }
     const mutation = /^\s*(INSERT|UPDATE|DELETE)/i.test(query.sql);
     if (query.sql.includes("LEFT JOIN eod_input_revisions actual")) {
@@ -471,6 +478,9 @@ export function createEodAdmission(ops: D1Database, runId: string, options: {
       await refreshAccountUsage();
     }
     const estimate = estimateEodQueries(queries);
+    // Validate atomic shape/population bounds even when an existing credit
+    // envelope has room; previously only opening a new envelope checked them.
+    const maximumWrites = maximumReservationWrites(queries);
     if (current && (current.date !== date || current.draining || now.getTime()>=current.expiresAt
       || current.reads-current.usedReads-current.pendingReads < estimate.reads
       || current.writes-current.usedWrites-current.pendingWrites < estimate.writes)) {
@@ -480,14 +490,14 @@ export function createEodAdmission(ops: D1Database, runId: string, options: {
     }
     let envelope = current;
     if (!envelope) {
-      try { envelope = await reserve(date, estimate,maximumReservationWrites(queries)); }
+      try { envelope = await reserve(date, estimate,maximumWrites); }
       catch (error) {
         if (!options.reconcileAccountUsage || !(error instanceof Error) || error.message !== "eod-account-window-unavailable") throw error;
         // No business query has been submitted. A concurrent sampler or a
         // slow collection may expire the cached window between checks; one
         // authenticated refresh can retry admission, never the actual query.
         await refreshAccountUsage();
-        envelope = await reserve(date, estimate,maximumReservationWrites(queries));
+        envelope = await reserve(date, estimate,maximumWrites);
       }
     }
     current = envelope;
