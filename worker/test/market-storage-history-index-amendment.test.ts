@@ -9,11 +9,12 @@ const identity={id:"market-storage:index-amendment",sourceDatabaseId:"11111111-1
   targetDatabaseId:"22222222-2222-4222-8222-222222222222",historyDatabaseId:"33333333-3333-4333-8333-333333333333",
   sessionDate:"2026-09-08",codeRevision:"a".repeat(40)};
 const options={historyDatabaseId:identity.historyDatabaseId,policy:"legacy" as const};
-async function fixture() {
+async function fixture(options:{fenceSuffix?:string}={}) {
   const history=createSqliteD1();
   try {
     history.script(readFileSync("history-migrations/0001_history.sql","utf8")
       +readFileSync("history-migrations/0002_market_storage_fence.sql","utf8")
+        .replace(") STRICT, WITHOUT ROWID;",`) STRICT, WITHOUT ROWID${options.fenceSuffix ?? ""};`)
       +`INSERT INTO market_history_blocks(id,feed,ticker,calendar_year,schema_version,codec,checksum,row_count,
         first_date,last_date,uncompressed_bytes,payload_base64)
         VALUES('block','sip','TEST',2026,1,'gzip-json-v1','checksum',1,'2026-09-08','2026-09-08',100,'retained');
@@ -28,6 +29,29 @@ async function fixture() {
 }
 
 describe("explicit additive history pointer-index amendment",{timeout:30_000},()=>{
+  it("accepts the exact retained historical transport suffix without rewriting the fence SQL or capture",async()=>{
+    const f=await fixture({fenceSuffix:" /* storage-reviewed-ddl */"});
+    try {
+      const before=await f.history.db.prepare("SELECT sql FROM sqlite_schema WHERE name='market_storage_fence'").first<string>("sql");
+      expect(before).toMatch(/\) STRICT, WITHOUT ROWID \/\* storage-reviewed-ddl \*\/$/);
+      const captureBefore=await f.history.db.prepare("SELECT * FROM market_storage_fence").all();
+      const legacy=await inspectStorageHistoryPointerIndexSchema(f.history.db,identity,f.capture,options);
+      expect(legacy.schemaHash).toBe(f.capture.schemaHash);
+      f.install();
+      const amendment=await inspectStorageHistoryPointerIndexSchema(f.history.db,identity,f.capture,{...options,policy:"indexed"});
+      await releaseStorageHistoryVerificationFence(f.history.db,identity,f.capture,amendment);
+      expect(await f.history.db.prepare("SELECT sql FROM sqlite_schema WHERE name='market_storage_fence'").first<string>("sql")).toBe(before);
+      expect((await f.history.db.prepare("SELECT * FROM market_storage_fence").all()).results).toEqual(captureBefore.results);
+    } finally {f.dispose();}
+  });
+  it.each([" /* arbitrary */"," /* storage-reviewed-ddl-extra */"," /* storage-reviewed-ddl */ /* arbitrary */"])
+    ("rejects unreviewed fence suffix %s",async(fenceSuffix)=>{
+      const f=await fixture({fenceSuffix});
+      try {
+        await expect(inspectStorageHistoryPointerIndexSchema(f.history.db,identity,f.capture,options))
+          .rejects.toThrow("storage-history-fence-schema-not-reviewed");
+      } finally {f.dispose();}
+    });
   it("preserves the original capture and rows, allows later tracked bootstrap writes, and uses atomic read-only inspection",async()=>{
     const f=await fixture();
     try {

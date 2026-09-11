@@ -89,7 +89,11 @@ function assertReviewedHistoryObjects(rows:HistorySchemaObject[],policy:HistoryS
     if(row.name.startsWith("market_storage_guard_") && row.type==="trigger"
       && [BLOCKS.name,POINTERS.name,"d1_migrations"].includes(row.tableName)) continue;
     if(row.name==="market_storage_fence") {
-      if(row.type!=="table" || !row.sql || normalizeHistorySql(row.sql)!==normalizeHistorySql(HISTORY_FENCE_SQL)) {
+      // The original D1 transport retained this exact reviewed label in
+      // sqlite_schema. Accept its historical suffix only on the fence table;
+      // captured SQL bytes/hashes and all other schema comparisons stay intact.
+      const definition=row.sql?.replace(/\s*\/\* storage-reviewed-ddl \*\/\s*$/,"");
+      if(row.type!=="table" || !definition || normalizeHistorySql(definition)!==normalizeHistorySql(HISTORY_FENCE_SQL)) {
         throw new Error("storage-history-fence-schema-not-reviewed");
       }
       continue;
