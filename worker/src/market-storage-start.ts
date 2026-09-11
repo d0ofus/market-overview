@@ -28,6 +28,18 @@ export type StorageStartDependencies = {
 const uuid = (value: string) => /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value);
 const unallocatedTarget = "00000000-0000-4000-8000-000000000000";
 
+/** Older reviewed DDL was installed without a terminator before its accounting
+ * comment, so SQLite retained that exact suffix in sqlite_schema. Ignore only
+ * that known suffix; preserve quoted values and every substantive schema token. */
+export function storageStartHistoryFenceSchemaMatches(actual: string, reviewed: string): boolean {
+  const normalize = (sql: string) => sql.trim().replace(/\s*\/\* storage-reviewed-ddl \*\/$/, "").trim()
+    .replace(/;$/, "").trim()
+    .replace(/'(?:''|[^'])*'|"(?:""|[^"])*"|`(?:``|[^`])*`|\[[^\]]*\]|\s+/g,
+      (token) => /^\s/.test(token) ? " " : token)
+    .replace(/^CREATE TABLE IF NOT EXISTS /i, "CREATE TABLE ");
+  return normalize(actual) === normalize(reviewed);
+}
+
 /** Operator-only start protocol. Capacity validation precedes provisioning; the
  * canonical/public market binding never changes here. Every durable identity
  * lives in Ops. The journal is diagnostic and cannot authorize a replay. */

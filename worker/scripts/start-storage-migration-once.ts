@@ -7,7 +7,7 @@ import { createEodAdmission, createEodD1Database } from "../src/eod-d1-rest";
 import { reconcileEodAccountUsage } from "../src/eod-account-usage";
 import { prepareStorageSourceFence } from "../src/market-storage-fence";
 import { loadStorageMigration } from "../src/market-storage-control";
-import { startStorageMigrationOnce, type StorageStartDatabase } from "../src/market-storage-start";
+import { startStorageMigrationOnce, storageStartHistoryFenceSchemaMatches, type StorageStartDatabase } from "../src/market-storage-start";
 import { storageStartSnapshotHash } from "./storage-start-snapshot";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -202,8 +202,7 @@ async function main(): Promise<void> {
         const historyDb = database(history, statements);
         const existing = await historyDb.prepare("SELECT sql FROM sqlite_schema WHERE type='table' AND name='market_storage_fence'").first<{ sql: string }>();
         if (existing) {
-          const normalize = (sql: string) => sql.replace(/\bIF NOT EXISTS\b/gi, "").replace(/\s+/g, " ").trim().replace(/;$/, "");
-          if (normalize(existing.sql) !== normalize(ddl[0]!)) throw new Error("storage-start-history-fence-schema-changed");
+          if (!storageStartHistoryFenceSchemaMatches(existing.sql, ddl[0]!)) throw new Error("storage-start-history-fence-schema-changed");
           const state = await historyDb.prepare("SELECT status FROM market_storage_fence WHERE id='default'").first<{ status: string }>();
           if (state?.status !== "open") throw new Error("storage-start-history-fence-not-open");
         }
