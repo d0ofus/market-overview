@@ -11,13 +11,17 @@ import { approveStoragePopulationExecution,resumeStoragePopulationExecution,stor
 import { approveStorageListingExecution,resumeStorageListingExecution,storageListingExecutionKey,STORAGE_LISTING_EXECUTION_PREVIOUS_REVISION,
   type StorageListingExecutionCodeContract } from "../src/market-storage-listing-execution";
 import { approveStorageRepairExecution,resumeStorageRepairExecution,storageRepairExecutionKey,STORAGE_REPAIR_EXECUTION_PREVIOUS_REVISION, type StorageRepairExecutionCodeContract } from "../src/market-storage-repair-execution";
+import { approveStorageCapacityExecution,resumeStorageCapacityExecution,loadStorageCapacityCaptureReuse,storageCapacityExecutionKey,
+  STORAGE_CAPACITY_EXECUTION_PREVIOUS_REVISION,type StorageCapacityExecutionCodeContract } from "../src/market-storage-capacity-execution";
+import { runStoragePopulationDeltaProof,storeStorageExpansionHistoryReceipt,loadCompletedStoragePopulationDelta } from "../scripts/eod-population-expansion-operator";
 import { loadStorageMigration,resumeStorageMigration,claimStorageMigration } from "../src/market-storage-control";
 import { loadStorageValidationPlan,type StoragePopulationPlan } from "../src/market-storage-population-plan";
 import { promoteStoragePopulationExpansion } from "../src/market-storage-population-promotion";
-import { verifyStoragePopulationDelta } from "../src/market-storage-population-expansion";
 import { loadStoragePlanConsumerProof } from "../src/market-storage-consumer-composite";
 import { captureOpenStorageDatabase } from "../src/eod-storage-capacity-renewal";
 import { prepareStoragePreflight } from "../src/market-storage-preflight";
+import { authenticateStoragePopulationArchiveContext } from "../src/eod-current-archive-validation";
+import { EOD_CURRENT_ARCHIVE_FORECAST_POLICY,type StorageCurrentArchiveContext } from "../src/eod-storage-layout";
 import { EOD_PUBLICATION_SCOPES } from "../src/eod-coordinator";
 import { EOD_CATALOG_SCOPE } from "../src/eod-catalog-service";
 import { runStoragePipeline } from "../src/market-storage-pipeline";
@@ -31,7 +35,8 @@ import * as eodRunner from "../src/eod-runner";
 import { registerListingEvidence, loadFrozenListingEvidence } from "../src/eod-listing-evidence";
 import type { Env } from "../src/types";
 
-const revision=STORAGE_VIX_QUARANTINE_PREVIOUS_REVISION,quarantineRevision=STORAGE_POPULATION_EXECUTION_PREVIOUS_REVISION,populationRevision=STORAGE_LISTING_EXECUTION_PREVIOUS_REVISION,listingRevision=STORAGE_REPAIR_EXECUTION_PREVIOUS_REVISION,repairRevision="e".repeat(40),stamp="2026-09-11T14:00:00.000Z";
+const revision=STORAGE_VIX_QUARANTINE_PREVIOUS_REVISION,quarantineRevision=STORAGE_POPULATION_EXECUTION_PREVIOUS_REVISION,populationRevision=STORAGE_LISTING_EXECUTION_PREVIOUS_REVISION,listingRevision=STORAGE_REPAIR_EXECUTION_PREVIOUS_REVISION,
+  repairRevision=STORAGE_CAPACITY_EXECUTION_PREVIOUS_REVISION,capacityRevision="c".repeat(40),stamp="2026-09-11T14:00:00.000Z";
 type Databases=ReturnType<typeof createStorageIndexDatabases>;
 let databases:Databases|undefined;
 afterEach(()=>{vi.restoreAllMocks();vi.useRealTimers();if(databases)Object.values(databases).forEach(db=>db.dispose());databases=undefined;});
@@ -43,7 +48,7 @@ async function prepared() {
     INSERT INTO d1_migrations(name,applied_at) VALUES('0001_history.sql','2026-09-08 00:00:00'),('0002_market_storage_fence.sql','2026-09-08 00:00:00');`);
   const tickers=["VIX","SPY",...Array.from({length:6317},(_,i)=>`A${String(i).padStart(5,"0")}`)];
   tickers[153]="RSHO";tickers[6125]="BNRG";
-  const f=await seedStorageIndexRecovery(dbs,{tickers,checkpointCount:84,copyComplete:true,authenticBaseline:true});
+  const f=await seedStorageIndexRecovery(dbs,{tickers,checkpointCount:84,copyComplete:true,authenticBaseline:true,copySourceRows:1_990_234});
   await ops.db.prepare("INSERT INTO provider_budget_counters(provider_key,window_kind,window_bucket,request_count,updated_at) VALUES('yahoo','day','2026-09-11',7,?)")
     .bind(stamp).run();
   await prepareStorageHistoryIndexRecovery(f.input);await applyStorageHistoryPointerIndexes(f.input);
@@ -128,7 +133,7 @@ describe("VIX identity correction preserves the actual private bootstrap",()=>{
       admission:async queries=>{const estimate=estimateEodQueries(queries);return async usage=>{expect(usage.rowsRead).toBeLessThanOrEqual(estimate.reads);expect(usage.rowsWritten).toBeLessThanOrEqual(estimate.writes);};},
       fetcher:async(_url,init)=>{const body=JSON.parse(String(init?.body)) as EodSql|{batch:EodSql[]},queries="batch" in body?body.batch:[body];
         for(const query of queries){expect(query.params.length).toBeLessThanOrEqual(100);for(const value of query.params)if(typeof value==="string")expect(Buffer.byteLength(value)).toBeLessThanOrEqual(2_000_000);}
-        if(queries.some(row=>/storage-(vix-continuation|population-execution|listing-execution|repair-execution|population-promotion)-guard-rejected/.test(row.sql)))wire.push(queries);
+        if(queries.some(row=>/storage-(vix-continuation|population-execution|listing-execution|repair-execution|capacity-execution|population-promotion)-guard-rejected/.test(row.sql)))wire.push(queries);
         return Response.json({success:true,result:await batch(queries.map(row=>ops.db.prepare(row.sql).bind(...row.params)))});}});
     const lost={prepare:rest.prepare.bind(rest),batch:async(statements:D1PreparedStatement[])=>{await rest.batch(statements);throw new Error("vix-lost-ack");}} as unknown as D1Database;
     await expect(approveStorageVixContinuation({...f.input,ops:lost})).rejects.toThrow("vix-lost-ack");
@@ -314,7 +319,7 @@ describe("VIX identity correction preserves the actual private bootstrap",()=>{
     }
     const pointers=(await target.db.prepare("SELECT scope,publication_id FROM eod_publication_pointers ORDER BY scope").all<{scope:string;publication_id:string}>()).results;
     const clock=(await target.db.prepare("SELECT revision FROM eod_input_clock WHERE id='default'").first<number>("revision"))!;
-    await ops.db.prepare("UPDATE market_storage_migrations SET status='awaiting-evidence',stage='bootstrap',error_code='storage-population-expansion-required',lease_token=NULL,lease_until=NULL,dispatch_token=NULL,updated_at=? WHERE id=?")
+    await ops.db.prepare("UPDATE market_storage_migrations SET status='awaiting-evidence',stage='bootstrap',error_code='storage-population-expansion-required',lease_token=NULL,lease_until=NULL,dispatch_token=NULL,next_attempt_at=NULL,updated_at=? WHERE id=?")
       .bind(expansionStamp,identity.id).run();
     const added=Array.from({length:11},(_,i)=>i===0?"GOLS":`ZZDELTA${i.toString().padStart(2,"0")}`),allTickers=[...repair.plan.tickers,...added].sort();
     // Synthetic text exercises the exact reviewed fund/date identity, not a
@@ -342,10 +347,11 @@ describe("VIX identity correction preserves the actual private bootstrap",()=>{
     const capture={...captureFields,captureHash:await storageHash(captureFields)};
     const assertCapture=async()=>{expect(await captureOpenStorageDatabase(target.db)).toEqual(marketCapture);expect(await captureOpenStorageDatabase(history.db)).toEqual(historyCapture);};
     const current=(await loadStorageMigration(ops.db,identity.id))!;
-    const deltaInput={ops:ops.db,run:current,previousPlan:repair.plan,sourceEnv:{...expandedEnv,DB:source.db,
-      MARKET_DATA_DB:source.db,MARKET_HISTORY_DB:undefined},targetEnv:expandedEnv,capture,addedTickers:added,assertCapture,maxTickers:10};
-    const partialDelta=await verifyStoragePopulationDelta(deltaInput);expect(partialDelta.evidence).toBeNull();
-    const delta=await verifyStoragePopulationDelta({...deltaInput,checkpoint:partialDelta.checkpoint});
+    const nextInputsHash=await storageHash(nextInputs);
+    const deltaInput={ops:ops.db,run:current,previousPlan:repair.plan,nextInputsHash,sourceEnv:{...expandedEnv,DB:source.db,
+      MARKET_DATA_DB:source.db,MARKET_HISTORY_DB:undefined},targetEnv:expandedEnv,capture,addedTickers:added,assertCapture,assertQuiescence:async()=>undefined,maxPages:1};
+    const partialDelta=await runStoragePopulationDeltaProof(deltaInput);expect(partialDelta.evidence).toBeNull();
+    const delta=await runStoragePopulationDeltaProof(deltaInput);
     expect(delta.evidence?.tickerCount).toBe(11);expect(Object.keys(delta.evidence!.checks)).toHaveLength(10);
     const analysis={...f.analysis,measuredAt:expansionStamp,population:{count:6330,sha256:await storageHash(allTickers)},
       retentionModels:f.analysis.retentionModels.map(model=>({...model,sharedTickers:6330,modeledSipRows:6330*(model.hotSessions+10),
@@ -357,28 +363,128 @@ describe("VIX identity correction preserves the actual private bootstrap",()=>{
       assertNoWorkflowWriters:vi.fn(async()=>undefined),assertDeltaCapture:assertCapture,measurePhysical:async()=>({
         targetBytes:1_000_000,historyBytes:1_000_000,measuredAt:expansionStamp})};
     await expect(promoteStoragePopulationExpansion(promotionInput)).rejects.toThrow("older-owner-not-complete");
-    await ops.db.prepare("UPDATE eod_runs SET status='completed',stage='complete',lease_token=NULL,lease_until=NULL,dispatch_token=NULL,error_code=NULL,error_message=NULL,completed_at=?,completed_input_clock=?,progress_json=? WHERE id=?")
+    // Completion leaves its historical error message intact in production.
+    await ops.db.prepare("UPDATE eod_runs SET status='completed',stage='finished',lease_token=NULL,lease_until=NULL,dispatch_token=NULL,error_code=NULL,next_attempt_at=NULL,completed_at=?,completed_input_clock=?,progress_json=? WHERE id=?")
       .bind(expansionStamp,clock,JSON.stringify({chunk:253,total:253,symbols:6319,published:pointers.filter(row=>row.scope!==EOD_CATALOG_SCOPE).map(row=>row.publication_id),
         catalogPublicationId:pointers.find(row=>row.scope===EOD_CATALOG_SCOPE)!.publication_id}),f.eodId).run();
-    const priorExpansion=await snapshots(),priorOwner=await ops.db.prepare("SELECT * FROM market_storage_checkpoints WHERE migration_id=? AND checkpoint_key='bootstrap:owner'").bind(identity.id).first();
-    await expect(promoteStoragePopulationExpansion({...promotionInput,env:{...expandedEnv,OPS_DB:raced}})).rejects.toThrow("malformed JSON");
+    await ops.db.prepare(`INSERT INTO market_storage_checkpoints(migration_id,checkpoint_key,input_hash,payload_json,updated_at)
+      SELECT migration_id,?,input_hash,payload_json,? FROM market_storage_checkpoints WHERE migration_id=? AND checkpoint_key='bootstrap:owner'`)
+      .bind(`bootstrap-history:${repair.plan.sessionDate}`,expansionStamp,identity.id).run();
+    const baselineBeforeCapacity=await snapshots();
+    const archiveContents={blocks:(await history.db.prepare("SELECT * FROM market_history_blocks ORDER BY id").all()).results,
+      pointers:(await history.db.prepare("SELECT * FROM market_history_block_pointers ORDER BY feed,ticker,calendar_year").all()).results};
+    const historyFileHash=await storageHash(archiveContents);
+    const receipt=await storeStorageExpansionHistoryReceipt(ops.db,{migrationId:identity.id,codeRevision:repairRevision,
+      previousPlanHash:repair.plan.planHash,nextInputsHash,captureHash:capture.captureHash,historyDatabaseId:identity.historyDatabaseId},
+      {directory:"synthetic-real-schema-capacity-fixture",file:"history-1.sqlite",rows:archiveContents.blocks.length+archiveContents.pointers.length,
+        hash:historyFileHash,fileHash:historyFileHash,capturedAt:expansionStamp});
+    const oldDelta=await loadCompletedStoragePopulationDelta({ops:ops.db,migrationId:identity.id,previousPlanHash:repair.plan.planHash,
+      nextInputsHash,capture,addedTickers:added});expect(oldDelta.records).toHaveLength(2);
+    // This explicitly synthetic failure uses the actual observed legacy report
+    // counters. It is authorization to revise the model, never a passing model.
+    const physicalArchiveBytes=191_549_440;
+    const failedAnalysis={...analysis,storageOnlyRecommendedHotSessions:null,
+      archive:{sourceRows:1_989_616,storageRoundTripPassed:true,database:{physicalBytes:physicalArchiveBytes},
+        withAdditionalCompleteRevisionAndTransientBytes:387_293_184,
+        fallbackReserve:{storage:"archive-only-bounded-v1",capacityTickers:1000,totalReservedTickers:1000,existingTickers:0,
+          existingTickersOutsidePopulation:0,modeledAdditionalTickers:1000,sessions:320,modeledRows:320_000,roundTripPassed:true,
+          measurementMethod:"sqlite-real-history-codec-v1",tickerHash:await storageHash(allTickers.slice(0,1000)),
+          physicalBytesBefore:164_438_016,physicalBytesAfter:physicalArchiveBytes}},
+      retentionModels:analysis.retentionModels.map(model=>({...model,fallbackStorage:"archive-only-bounded-v1",fallbackTickerReserve:1000,modeledFallbackRows:0}))};
+    const failedAnalysisFileHash=await storageHash(failedAnalysis);
+    const capacityFields:Omit<StorageCapacityExecutionCodeContract,"evidenceHash">={version:1,policy:"completed-capacity-model-contracts-v1",
+      fromRevision:repairRevision,codeRevision:capacityRevision,protectedFileCount:4,protectedManifestHash:"1".repeat(64),integrationContractHash:"2".repeat(64),
+      reviewedChangesHash:"3".repeat(64),beforeTreeHash:"4".repeat(64),afterTreeHash:"5".repeat(64)};
+    const capacityInput={...f.input,now:new Date(),fromRevision:repairRevision,codeRevision:capacityRevision,expectedPlanHash:repair.plan.planHash,
+      changedFiles:["worker/scripts/analyze-eod-storage.py","worker/src/eod-storage-layout.ts"],diffHash:"a".repeat(64),
+      codeContract:{...capacityFields,evidenceHash:await storageHash(capacityFields)},loadCurrentInputs:async()=>nextInputs,
+      failedAnalysis,failedAnalysisFileHash,assertCapturedArtifact:async(value:typeof receipt)=>{expect(value).toEqual(receipt);return {historyFileHash,analysisFileHash:failedAnalysisFileHash};},
+      measurePhysical:async()=>({targetBytes:1_000_000,historyBytes:1_000_000,measuredAt:expansionStamp})};
+    await expect(approveStorageCapacityExecution({...capacityInput,assertCapturedArtifact:async()=>({historyFileHash:"0".repeat(64),analysisFileHash:failedAnalysisFileHash})}))
+      .rejects.toThrow("captured-artifact-mismatch");
+    await expect(approveStorageCapacityExecution({...capacityInput,ops:raced})).rejects.toThrow("malformed JSON");
+    expect(await ops.db.prepare("SELECT evidence_json FROM eod_rollout_evidence WHERE id=?").bind(storageCapacityExecutionKey(identity.id,capacityRevision)).first()).toBeNull();
     await ops.db.prepare("UPDATE eod_checkpoints SET payload_json=? WHERE run_id=? AND chunk_key='features:1'").bind(feature.payload_json,f.eodId).run();
-    await expect(promoteStoragePopulationExpansion({...promotionInput,env:{...expandedEnv,OPS_DB:lost}})).rejects.toThrow("vix-lost-ack");
-    const promoted=await promoteStoragePopulationExpansion({...promotionInput,env:{...expandedEnv,OPS_DB:rest}});
+    await expect(approveStorageCapacityExecution({...capacityInput,ops:lost})).rejects.toThrow("vix-lost-ack");
+    const capacity=await approveStorageCapacityExecution({...capacityInput,ops:rest});
+    expect(capacity.continuation.failure).toMatchObject({localSourceRows:1_989_616,verifiedCopySourceRows:1_990_234,sourceCountMismatch:true,
+      projectedArchiveBytes:387_293_184,physicalArchiveBytes});
+    expect(capacity.continuation.featureCheckpointCount).toBe(253);
+    expect(capacity.plan.inputs).toEqual(repair.plan.inputs);expect(capacity.plan.capture).toEqual(repair.plan.capture);
+    expect(await snapshots()).toEqual(baselineBeforeCapacity);
+    expect(wire).toHaveLength(6);expect(wire[5]).toHaveLength(8);
+    expect(Buffer.byteLength(JSON.stringify({batch:wire[5]}))).toBeLessThan(8_000_000);
+    const capacityRun=(await loadStorageMigration(ops.db,identity.id))!,capacityPlan=await loadStorageValidationPlan(ops.db,capacityRun);
+    expect(await loadStorageHistoryIndexAmendment(ops.db,capacityRun,capacityPlan)).toEqual(f.amendment);
+    const reuse=await loadStorageCapacityCaptureReuse(ops.db,capacityRun,capacityPlan);
+    expect(reuse?.receipt).toEqual(receipt);expect(reuse?.delta).toEqual(oldDelta);
+    expect(reuse?.continuation.originalHistory).toEqual(capacity.continuation.originalHistory);
+    const finalDelta=oldDelta.records.at(-1)!;
+    await ops.db.prepare("UPDATE eod_rollout_evidence SET evidence_json='{}' WHERE id=?").bind(finalDelta.id).run();
+    await expect(loadStorageCapacityCaptureReuse(ops.db,capacityRun,capacityPlan)).rejects.toThrow("completed-delta-integrity");
+    await ops.db.prepare("UPDATE eod_rollout_evidence SET evidence_json=? WHERE id=?").bind(finalDelta.payload,finalDelta.id).run();
+    await resumeStorageCapacityExecution(ops.db,identity.id,capacityRevision);
+    expect(await ops.db.prepare("SELECT status,error_code,next_attempt_at FROM market_storage_migrations WHERE id=?").bind(identity.id).first())
+      .toEqual({status:"awaiting-evidence",error_code:"storage-population-expansion-required",next_attempt_at:null});
+    expect(await snapshots()).toEqual(baselineBeforeCapacity);
+    // Only the separate full-population sizing supplied below can authorize
+    // expansion. The failed legacy report is retained in its original receipt.
+    const capacityPromotion={...promotionInput,env:{...expandedEnv,EOD_CODE_REVISION:capacityRevision},expectedPlanHash:capacity.plan.planHash};
+    const priorExpansion=await snapshots(),priorOwner=await ops.db.prepare("SELECT * FROM market_storage_checkpoints WHERE migration_id=? AND checkpoint_key='bootstrap:owner'").bind(identity.id).first();
+    await expect(promoteStoragePopulationExpansion({...capacityPromotion,env:{...capacityPromotion.env,OPS_DB:raced}})).rejects.toThrow("malformed JSON");
+    await ops.db.prepare("UPDATE eod_checkpoints SET payload_json=? WHERE run_id=? AND chunk_key='features:1'").bind(feature.payload_json,f.eodId).run();
+    await expect(promoteStoragePopulationExpansion({...capacityPromotion,env:{...capacityPromotion.env,OPS_DB:lost}})).rejects.toThrow("vix-lost-ack");
+    const promoted=await promoteStoragePopulationExpansion({...capacityPromotion,env:{...capacityPromotion.env,OPS_DB:rest}});
     expect(promoted.status).toBe("already-promoted");expect(promoted.plan.tickers).toHaveLength(6330);
     expect(promoted.plan.inputs.listingEvidence).toEqual(listingEvidence);expect(Object.hasOwn(repair.plan.inputs,"listingEvidence")).toBe(false);
-    expect(wire).toHaveLength(6);expect(wire[5]).toHaveLength(8);
-    expect(new TextEncoder().encode(JSON.stringify({batch:wire[5]})).length).toBeLessThan(8_000_000);
+    expect(wire).toHaveLength(7);expect(wire[6]).toHaveLength(8);
+    expect(new TextEncoder().encode(JSON.stringify({batch:wire[6]})).length).toBeLessThan(8_000_000);
     expect(promoted.plan.capture).toEqual(repair.plan.capture);
     expect(await snapshots()).toEqual(priorExpansion);
     expect(await ops.db.prepare("SELECT * FROM market_storage_checkpoints WHERE migration_id=? AND checkpoint_key='bootstrap:owner'").bind(identity.id).first()).toEqual(priorOwner);
     const promotedRun=(await loadStorageMigration(ops.db,identity.id))!,promotedPlan=await loadStorageValidationPlan(ops.db,promotedRun);
     const composite=await loadStoragePlanConsumerProof(ops.db,promotedRun,promotedPlan);
+    // The final acceptance boundary resolves the original immutable capture
+    // through the expanded plan; an otherwise well-shaped local context alone
+    // cannot substitute another file, receipt, or authorization.
+    const contextFields:Omit<StorageCurrentArchiveContext,"evidenceHash">={version:1,policy:EOD_CURRENT_ARCHIVE_FORECAST_POLICY,
+      historySnapshotSha256:receipt.fileHash,historyCaptureHash:receipt.captureHash,historyCapturedAt:receipt.capturedAt,
+      historyReceiptHash:receipt.evidenceHash,historyPhysicalBytes:capacity.continuation.physical.historyBytes,
+      historyPhysicalMeasuredAt:capacity.continuation.physical.measuredAt,sourceSnapshotSha256:promotedPlan.sourceSnapshotHash,
+      copySourceRows:capacity.continuation.failure.verifiedCopySourceRows,forecastSessionDate:promotedPlan.sessionDate,
+      calendarDates:promotedPlan.inputs.calendarDates,forecastCalendarDates:Array.from({length:40},(_,index)=>
+        new Date(Date.parse(`${promotedPlan.sessionDate}T00:00:00Z`)+(index+1)*86400_000).toISOString().slice(0,10)),
+      tickerHash:await storageHash([...promotedPlan.tickers].sort()),
+      authorization:{kind:"population-expansion",codeRevision:promotedPlan.codeRevision,evidenceHash:promotedPlan.populationExpansionHash!}};
+    const context={...contextFields,evidenceHash:await storageHash(contextFields)};
+    await expect(authenticateStoragePopulationArchiveContext(ops.db,identity.id,context)).resolves.toBeUndefined();
+    await expect(authenticateStoragePopulationArchiveContext(ops.db,identity.id,{...context,historyReceiptHash:"0".repeat(64)}))
+      .rejects.toThrow("storage-current-archive-authorization-mismatch");
+    await expect(authenticateStoragePopulationArchiveContext(ops.db,identity.id,{...context,authorization:{...context.authorization,evidenceHash:"0".repeat(64)}}))
+      .rejects.toThrow("storage-current-archive-authorization-mismatch");
     expect(composite.version).toBe(2);expect(composite.tickerCount).toBe(6330);
     if(composite.version!==2)throw new Error("expected-composite");
     expect(composite.baseline.evidence.completedAt).toBe(stamp);expect(composite.delta.evidence.completedAt).toBe(expansionStamp);
     expect(composite.delta.tickers).toEqual(added);expect(composite.baseline.tickers).toEqual(repair.plan.tickers);
     expect(await loadStorageHistoryIndexAmendment(ops.db,promotedRun,promotedPlan)).toEqual(f.amendment);
+    const immutableCapacityRow=await ops.db.prepare("SELECT * FROM eod_rollout_evidence WHERE id=?")
+      .bind(storageCapacityExecutionKey(identity.id,capacityRevision)).first();
+    const nextClaim=await claimStorageMigration(ops.db,identity.id,{executionRevision:capacityRevision});expect(nextClaim).not.toBeNull();
+    run.mockClear();run.mockRejectedValue(new Error("capacity-real-latest-price-boundary"));
+    await expect(runStoragePipeline({source:source.db,target:target.db,history:history.db,ops:ops.db,run:nextClaim!.run,leaseToken:nextClaim!.leaseToken,
+      installSourceFence:install,installTargetFence:install,installHistoryFence:install,bootstrapEnv:capacityPromotion.env,bootstrapFailureDb:ops.db}))
+      .rejects.toThrow("capacity-real-latest-price-boundary");
+    expect(run).toHaveBeenCalledOnce();expect(run.mock.calls[0][1]).toBe("eod:active:2026-09-11:daily");
+    expect(run.mock.calls[0][3]?.storageInputs).toEqual(nextInputs);expect(install).not.toHaveBeenCalled();
+    const afterLatestClaim=await snapshots();
+    for(const key of ["eod","features","publications","pointers","history","repairs","inputClock","revisions","sourceFence","usage","accountUsage","providerCounters"] as const)
+      expect(afterLatestClaim[key]).toEqual(priorExpansion[key]);
+    expect(afterLatestClaim.proofs.filter(row=>!String(row.checkpoint_key).startsWith("bootstrap-history:")))
+      .toEqual(priorExpansion.proofs.filter(row=>!String(row.checkpoint_key).startsWith("bootstrap-history:")));
+    expect(await ops.db.prepare("SELECT * FROM eod_rollout_evidence WHERE id=?").bind(storageCapacityExecutionKey(identity.id,capacityRevision)).first())
+      .toEqual(immutableCapacityRow);
+    expect((await loadStorageCapacityCaptureReuse(ops.db,(await loadStorageMigration(ops.db,identity.id))!,promotedPlan))?.continuation.originalHistory)
+      .toEqual(capacity.continuation.originalHistory);
     currentInputs.mockRestore();
 
   });

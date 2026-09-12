@@ -1,5 +1,6 @@
 import { assertEodRollingBudget, resolveEodBudgetProfile, type EodBudgetProfile } from "./eod-budget-profile";
 import { EOD_PUBLICATION_SCOPES } from "./eod-coordinator";
+import { authenticateStoragePopulationArchiveContext } from "./eod-current-archive-validation";
 import { EOD_METRICS_VERSION } from "./eod-metrics";
 import { MARKET_HISTORY_REQUIRED_CONSUMERS } from "./eod-history-maintenance";
 import { decodeEodPayload, type EodStoredPayload } from "./eod-publication-codec";
@@ -88,7 +89,8 @@ export async function buildStorageCutoverEvidence(input: {
     tickers: input.tickers, expectedSession: input.expectedSession });
   const capacity = await validateStorageCapacityAnalysis({ analysis: input.analysis, publicationGrowth: input.publicationGrowth,
     identity, tickers: input.tickers, sourceSchemaHash: input.capture.sourceCapture.schemaHash,
-    sourceSnapshotSha256: input.sourceSnapshotSha256, publications, target: env.MARKET_DATA_DB, history: env.MARKET_HISTORY_DB, now });
+    sourceSnapshotSha256: input.sourceSnapshotSha256, publications, target: env.MARKET_DATA_DB, history: env.MARKET_HISTORY_DB, now,
+    authorizeCurrentArchive:context=>authenticateStoragePopulationArchiveContext(env.OPS_DB!,identity.id,context) });
   const runQuery = () => env.OPS_DB!.prepare("SELECT input_json,progress_json FROM eod_runs WHERE id=?")
     .bind(input.runId).first<{ input_json: string; progress_json: string }>();
   const run = await runQuery();

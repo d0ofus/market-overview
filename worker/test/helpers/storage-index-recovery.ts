@@ -37,7 +37,7 @@ export function createStorageIndexDatabases() {
 
 export async function seedStorageIndexRecovery(
   {source,target,history,ops}:ReturnType<typeof createStorageIndexDatabases>,
-  options:{population?:number;checkpointCount?:number;tickers?:string[];config?:FrozenInputs["config"];copyComplete?:boolean;authenticBaseline?:boolean}={}
+  options:{population?:number;checkpointCount?:number;tickers?:string[];config?:FrozenInputs["config"];copyComplete?:boolean;authenticBaseline?:boolean;copySourceRows?:number}={}
 ) {
     const population=options.tickers?.length ?? options.population ?? 1,checkpointCount=options.checkpointCount ?? 4;
     const now=new Date(),stamp=now.toISOString();await createStorageMigration(ops.db,identity,now);
@@ -72,7 +72,8 @@ export async function seedStorageIndexRecovery(
       leaseToken:owner.leaseToken,history:history.db,installHistoryFence:async statements=>{history.script(statements.join("\n"));}}):null;
     const baselineHash=baseline?.hash??"e".repeat(64),originalCopyCaptureHash=await storageHash([identity,sourceCapture,targetCapture,historyCapture,baselineHash,"verification-v1"]);
     await saveStorageMigrationCheckpoint(ops.db,identity.id,owner.leaseToken,{key:"verification:complete",inputHash:originalCopyCaptureHash,
-      payload:{schemaVersion:1,verified:true,identity,sourceCapture,targetCapture,historyCapture,captureHash:originalCopyCaptureHash,archive:{baselineHash,...(baseline?{baselinePointerRows:baseline.pointerRows,baselineBlockRows:baseline.blockRows}:{})}}},now);
+      payload:{schemaVersion:1,verified:true,identity,sourceCapture,targetCapture,historyCapture,captureHash:originalCopyCaptureHash,
+        ...(options.copySourceRows===undefined?{}:{prices:{sourceRows:options.copySourceRows}}),archive:{baselineHash,...(baseline?{baselinePointerRows:baseline.pointerRows,baselineBlockRows:baseline.blockRows}:{})}}},now);
     const fields={identity,sourceCapture,targetCapture,historyCapture},capture={...fields,captureHash:await storageHash(fields)};
     const inputs:FrozenInputs={config:options.config ?? {} as FrozenInputs["config"],tickers,calendarDates:[identity.sessionDate,"2026-09-10"],methodologyVersion:EOD_METRICS_VERSION,
       memberships:["sp500","nasdaq100","nasdaq","russell2000","overall"].map(universeId=>({universeId,versionId:`v:${universeId}`,source:"official",sourceType:"official",

@@ -288,16 +288,30 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
         tickers:run.purpose==="backfill" ? selection.historyTickers ?? inputs.tickers : inputs.tickers,
         historySessions:run.purpose==="backfill" ? selection.historySessions : 520,
         calendarDates:inputs.calendarDates,progress,reconcileHistory:run.purpose==="maintenance"});
-      await runDb.prepare(`UPDATE eod_runs SET status='completed',stage='finished',progress_json=?,lease_until=NULL,
-        lease_token=NULL,completed_at=?,updated_at=?,next_attempt_at=NULL,error_code=NULL WHERE id=? AND lease_token=?`)
-        .bind(JSON.stringify(result),new Date().toISOString(),new Date().toISOString(),runId,lease).run();
+      const blockedBackfill=run.purpose==="backfill" && Object.keys(result.deepWork.blocked).length>0;
+      const deferredBackfill=run.purpose==="backfill" && result.deepWork.nextAttemptAt;
+      if (blockedBackfill) {
+        await runDb.prepare(`UPDATE eod_runs SET status='failed',stage='deep-history-capacity-required',progress_json=?,lease_until=NULL,
+          lease_token=NULL,completed_at=NULL,updated_at=?,next_attempt_at=NULL,error_code='history-capacity-required',
+          error_message='Explicit history request retained; requested span requires reviewed capacity or calendar evidence.' WHERE id=? AND lease_token=?`)
+          .bind(JSON.stringify(result),new Date().toISOString(),runId,lease).run();
+      } else if (deferredBackfill) {
+        await runDb.prepare(`UPDATE eod_runs SET status='retrying',stage='deep-history-deferred',progress_json=?,lease_until=NULL,
+          lease_token=NULL,completed_at=NULL,updated_at=?,next_attempt_at=?,error_code='history-budget-deferred',
+          error_message='Explicit history request retained; weekly deep-history capacity exhausted.' WHERE id=? AND lease_token=?`)
+          .bind(JSON.stringify(result),new Date().toISOString(),deferredBackfill,runId,lease).run();
+      } else {
+        await runDb.prepare(`UPDATE eod_runs SET status='completed',stage='finished',progress_json=?,lease_until=NULL,
+          lease_token=NULL,completed_at=?,updated_at=?,next_attempt_at=NULL,error_code=NULL WHERE id=? AND lease_token=?`)
+          .bind(JSON.stringify(result),new Date().toISOString(),new Date().toISOString(),runId,lease).run();
+      }
       // Recalculate the already published session after input revision changes.
       const reconcileId=`eod:${run.mode}:${run.session_date}:reconcile`;
       await runDb.prepare(`INSERT INTO eod_runs(id,session_date,purpose,mode,status,stage,created_at,updated_at)
         VALUES(?,?,'reconcile',?,'queued','queued',?,?) ON CONFLICT(session_date,purpose,mode) DO UPDATE SET
         status='queued',input_json='{}',next_attempt_at=NULL,completed_at=NULL WHERE eod_runs.status='completed'`)
         .bind(reconcileId,run.session_date,run.mode,new Date().toISOString(),new Date().toISOString()).run();
-      return {status:"completed",published:[]};
+      return {status:blockedBackfill ? "failed" : deferredBackfill ? "retrying" : "completed",published:[]};
     }
     const provider=new EodPriceProvider(env);
     const features=new Map<string,EodTickerMetrics>();

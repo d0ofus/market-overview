@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, resolve } from "node:path";
@@ -12,7 +12,7 @@ import { loadMarketHistory, type MarketHistoryBar } from "../src/market-history"
 import { verifyStorageConsumerBatch, STORAGE_CONSUMER_CONTRACTS, collectStoragePublicationGrowthSamples,
   storagePublicationGrowthReserve, validateStorageCapacityAnalysis } from "../src/market-storage-acceptance";
 import { EOD_PUBLICATION_SCOPES } from "../src/eod-coordinator";
-import { estimateEodQueries } from "../src/eod-d1-rest";
+import { createEodD1Database, estimateEodQueries, type D1Settlement, type EodSql } from "../src/eod-d1-rest";
 import { eodHash } from "../src/eod-publication-service";
 import type { Env } from "../src/types";
 
@@ -37,6 +37,51 @@ describe("fresh captured SQLite renewal reference", () => {
       .bind(bar.feed,bar.ticker,bar.date,bar.o,bar.h,bar.l,bar.c,bar.volume,bar.sourceProvider,bar.adjustment,
         bar.observedAt,bar.fetchedAt,bar.reportedVolume ?? null,bar.reportedVolumeCollectedAt ?? null)));
   }
+  it("captures exact archive primary keys in unchanged eight-row REST batches with bounded accounting and actual settlement", async () => {
+    await history.script(readFileSync(resolve("history-migrations/0003_history_pointer_indexes.sql"), "utf8"));
+    for (let index = 0; index < 17; index++) {
+      await copyStorageArchiveBlock(history.db, [{ ticker: `KEY${String(index).padStart(2, "0")}`, feed: "sip", date: "2026-09-08",
+        o: 100, h: 102, l: 99, c: 101, volume: 1000, sourceProvider: "alpaca", adjustment: "split",
+        observedAt: "2026-09-08T21:00:00Z", fetchedAt: "2026-09-08T21:00:00Z" }]);
+    }
+    const original = await history.db.prepare("SELECT * FROM market_history_blocks ORDER BY id").all<Record<string, unknown>>();
+    const before = await captureOpenStorageDatabase(history.db);
+    const exactSql = 'SELECT "id","feed","ticker","calendar_year","schema_version","codec","checksum","row_count","first_date","last_date","uncompressed_bytes","payload_base64","created_at","verified_at" FROM market_history_blocks WHERE id=?';
+    const plan = await history.db.prepare(`EXPLAIN QUERY PLAN ${exactSql}`).bind(original.results[0].id).all<{ detail: string }>();
+    expect(plan.results.map((row) => row.detail).join(" ")).toMatch(/SEARCH market_history_blocks USING PRIMARY KEY \(id=\?\)/);
+    const submitted: EodSql[][] = [];
+    const settlements: Array<{ rowsRead: number; rowsWritten: number }> = [];
+    const fetcher = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as EodSql | { batch: EodSql[] };
+      const queries = "batch" in body ? body.batch : [body];
+      submitted.push(queries);
+      for (const query of queries) expect(query.sql).toBe(`${exactSql} /* storage-archive-point-read */`);
+      const result = await history.db.batch(queries.map((query) => history.db.prepare(query.sql).bind(...query.params)));
+      expect(result.every((row) => row.results.length === 1 && row.meta.rows_read === 1 && row.meta.rows_written === 0)).toBe(true);
+      return Response.json({ success: true, result });
+    });
+    const transport = createEodD1Database({ accountId: "b".repeat(32), token: "capture-fixture", databaseId: "00000000-0000-4000-8000-000000000001",
+      allowedDatabaseIds: ["00000000-0000-4000-8000-000000000001"], fetcher,
+      admission: async (queries) => {
+        expect(queries.length).toBeLessThanOrEqual(8);
+        expect(estimateEodQueries(queries)).toEqual({ reads: queries.length * 64, writes: 0 });
+        return Object.assign(async (usage: Parameters<D1Settlement>[0]) => { settlements.push(usage); }, {
+          abandon: async () => { throw new Error("unexpected-abandoned-capture"); },
+        }) as D1Settlement;
+      } });
+    // Schema/keyset reads remain the real local fixture. Every payload batch
+    // exercises the production REST validator, request body and metered result.
+    const captureDb = { ...history.db, batch: (queries: D1PreparedStatement[]) => transport.batch(
+      (queries as unknown as EodSql[]).map((query) => transport.prepare(query.sql).bind(...query.params))) } as D1Database;
+    const file = join(directory, "point-accounted-history.sqlite");
+    await captureCapacityDatabase({ db: captureDb, kind: "history", file, progress: async () => undefined,
+      assertCurrent: async () => { expect(await captureOpenStorageDatabase(history.db)).toEqual(before); } });
+    expect(submitted.map((batch) => batch.length)).toEqual([8, 8, 1]);
+    expect(submitted.flatMap((batch) => batch.map((query) => query.params))).toEqual(original.results.map((row) => [row.id]));
+    expect(settlements.map(({ rowsRead, rowsWritten }) => [rowsRead, rowsWritten])).toEqual([[8, 0], [8, 0], [1, 0]]);
+    const captured = createCapacityLocalSqlite(file); locals.push(captured);
+    expect((await captured.db.prepare("SELECT * FROM market_history_blocks ORDER BY id").all()).results).toEqual(original.results);
+  });
   it("captures real schemas and runs every reader against independent MAX history including gaps, corrections, Yahoo and unsupported rows", async () => {
     const dates: string[] = [];
     for (const date = new Date("2026-09-08T00:00:00Z"); dates.length < 1_380; date.setUTCDate(date.getUTCDate()-1)) {

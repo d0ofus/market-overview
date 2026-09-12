@@ -8,6 +8,7 @@ import { archiveMarketHistoryBars, loadMarketHistory } from "../src/market-histo
 import { loadEodCatalogRows } from "../src/eod-catalog-service";
 import { loadEodMemberships } from "../src/eod";
 import * as configDb from "../src/db";
+import * as historyWork from "../src/eod-history-runner";
 const calls=vi.hoisted(() => ({alpaca:vi.fn(),yahoo:vi.fn()}));
 vi.mock("../src/market-calendar-cache",() => ({ensureMarketCalendarCoverage:vi.fn()}));
 vi.mock("../src/eod",() => ({refreshBreadthUniverseMemberships:vi.fn(),loadEodMemberships:vi.fn()}));
@@ -77,6 +78,24 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
     expect((await runEodBatch(env,runId)).status).toBe("not-claimed");
     expect(calls.alpaca).not.toHaveBeenCalled();
     expect(calls.yahoo).not.toHaveBeenCalled();
+  });
+
+  it.each([false,true])("persists selected deep-history capacity deferral without changing requested depth (blocked=%s)",async blocked=>{
+    await ops.db.prepare("UPDATE eod_runs SET purpose='backfill',history_sessions=1400,history_tickers_json='[\"SPY\"]' WHERE id=?").bind(runId).run();
+    const nextAttemptAt="2026-09-14T00:00:00.000Z", reason=blocked?"history-request-exceeds-weekly-capacity":"weekly-history-budget-deferred";
+    const result:Awaited<ReturnType<typeof historyWork.runEodHistoryWork>>={missing:{SPY:reason},historyStart:dates[0],historySessions:1400,coverageStatus:"partial",
+      deepWork:{weekStart:"2026-09-07",maxSecurities:4,maxObservations:2500,admittedSecurities:0,chargedObservations:0,
+        deferred:{SPY:reason},blocked:blocked?{SPY:reason}:{},nextAttemptAt:blocked?null:nextAttemptAt}};
+    const work=vi.spyOn(historyWork,"runEodHistoryWork").mockResolvedValue(result);
+    try {
+      expect(await runEodBatch(env,runId)).toEqual({status:blocked?"failed":"retrying",published:[]});
+      expect(work).toHaveBeenCalledWith(env,expect.objectContaining({tickers:["SPY"],historySessions:1400}));
+      const stored=await ops.db.prepare("SELECT status,stage,next_attempt_at,error_code,history_sessions,history_tickers_json,progress_json FROM eod_runs WHERE id=?").bind(runId).first();
+      expect(stored).toEqual({status:blocked?"failed":"retrying",stage:blocked?"deep-history-capacity-required":"deep-history-deferred",
+        next_attempt_at:blocked?null:nextAttemptAt,error_code:blocked?"history-capacity-required":"history-budget-deferred",
+        history_sessions:1400,history_tickers_json:'["SPY"]',progress_json:JSON.stringify(result)});
+      expect(calls.alpaca).not.toHaveBeenCalled();expect(calls.yahoo).not.toHaveBeenCalled();
+    } finally {work.mockRestore();}
   });
 
   async function interruptShortHistorySlice(missingCurrent?:"price"|"adjacent",missingSymbol="MISSING0",historicalEnd?:string) {

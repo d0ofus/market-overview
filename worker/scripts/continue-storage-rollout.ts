@@ -9,6 +9,8 @@ import { localRecoveryChildReason, localRecoveryFailure, localRecoveryRequiresBo
 import { resolveEodBudgetProfile } from "../src/eod-budget-profile";
 import { assertStorageExecutionRevision } from "../src/market-storage-execution";
 import { loadStorageMigration } from "../src/market-storage-control";
+import { loadStorageValidationPlan } from "../src/market-storage-population-plan";
+import { prepareStorageExpansionArchiveContext } from "./storage-current-archive-context";
 import { storeEodControllerReport, type EodControllerReport } from "../src/eod-recovery-status";
 import { runtimeCandidateEvidenceFilename, runtimeCollectorOptions, runtimeCollectorCacheMatches, type RuntimeCollectorOptions } from "../src/eod-runtime-candidate";
 
@@ -220,8 +222,20 @@ async function main(): Promise<void> {
         const reserve = Math.ceil((growth.afterBytes-growth.beforeBytes)/growth.completeSessionSets)*growth.forecastSessions*growth.revisionsPerSession;
         if (!Number.isSafeInteger(reserve) || reserve <= 0) throw new Error("storage-local-growth-measurement-invalid");
         await phase("final-capacity");
+        const migration=await loadStorageMigration(ops,migrationId);if(!migration)throw new Error("storage-local-migration-missing");
+        const acceptedPlan=await loadStorageValidationPlan(ops,migration);
+        const calendarDb=createEodD1Database({accountId:input.accountId,token,databaseId:migration.target_database_id,allowedDatabaseIds:[...allowedDatabaseIds,migration.target_database_id],admission});
+        const currentArchive=await prepareStorageExpansionArchiveContext({ops,target:calendarDb,run:migration,plan:acceptedPlan,inputs:acceptedPlan.inputs,
+          historyFile:historySnapshot,sourceFile:snapshot,temporaryRoot:tmp});
+        const archiveContextPath=resolve(artifactDirectory,"current-archive-context.json");
+        if(currentArchive) {
+          const text=JSON.stringify(currentArchive);
+          if(existsSync(archiveContextPath)&&readFileSync(archiveContextPath,"utf8")!==text)throw new Error("storage-local-current-archive-context-conflict");
+          if(!existsSync(archiveContextPath))writeFileSync(archiveContextPath,text,{flag:"wx"});
+        }
         command("python",[resolve(root,"worker/scripts/analyze-eod-storage.py"),"--source-sqlite",snapshot,"--tickers-json",tickerPath,
-          "--session-date",plan.sessionDate,"--history-sqlite",historySnapshot,"--publication-growth-reserve-bytes",String(reserve),"--output",env.EOD_STORAGE_ANALYSIS_PATH!],env);
+          "--session-date",plan.sessionDate,"--history-sqlite",historySnapshot,"--publication-growth-reserve-bytes",String(reserve),
+          ...(currentArchive?["--current-archive-context-json",archiveContextPath]:[]),"--output",env.EOD_STORAGE_ANALYSIS_PATH!],env);
         await phase("runtime-candidate"); node("prepare-eod-runtime-candidate.ts",["run"]);
         await phase("cutover-evidence"); node("market-storage-runner.ts",["build-cutover-evidence"]);
       },

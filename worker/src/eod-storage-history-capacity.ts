@@ -1,3 +1,4 @@
+import { authenticateStoragePopulationArchiveContext,storageAcceptedArchiveForecast,storageArchiveMonitorProjection,validateStorageCurrentArchiveReport,type StorageAcceptedArchiveForecast } from "./eod-current-archive-validation";
 import { eodHash } from "./eod-publication-service";
 import { assertHistoryPruneEvidence, MARKET_HISTORY_REQUIRED_CONSUMERS, type HistoryCapacityEvidence, type HistoryReaderEvidence } from "./eod-history-maintenance";
 import { type StorageAcceptanceCapture, type StoragePublicationEvidence,
@@ -18,7 +19,7 @@ type Approval = {
     consumerProofHash: string; readers: HistoryReaderEvidence; capacity: AcceptedCapacity;
     storageIdentity?: StorageAcceptanceCapture["identity"]; executionApprovalHash?: string;
     model: { measuredAt: string; sourceSnapshotHash: string; priceTableAndIndexBytes: number; modeledPriceRows: number;
-      fullLayoutBytes: number; hotSessions: 260 | 90; sweepHeadroomSessions: number; fallbackStorage?: string };
+      fullLayoutBytes: number; hotSessions: 260 | 90; sweepHeadroomSessions: number; fallbackStorage?: string;currentArchiveForecast?:StorageAcceptedArchiveForecast };
     horizon: { anchorSession: string; lastCoveredSession: string; expiresAt: string; sessions: number } };
 };
 export type StorageHistoryMaintenanceApproval = Approval;
@@ -84,6 +85,8 @@ export async function storeStorageHistoryMaintenanceApproval(env: Env, input: {
   const selected = models.find((row) => row.hotSessions === input.capacity.hotSessions), model = object(selected), database = object(model.database);
   const priceBytes = database.priceTableAndIndexBytes, physicalBytes = database.physicalBytes, headroom = model.sweepHeadroomSessions;
   const sourceSnapshotHash = object(report.source).snapshotSha256;
+  const archiveContext=await validateStorageCurrentArchiveReport(report,{codeRevision:identity.codeRevision,tickerHash:await eodHash(tickers),sourceSnapshotHash:String(sourceSnapshotHash),sessionDate:input.publications.sessionDate});
+  if(archiveContext)await authenticateStoragePopulationArchiveContext(env.OPS_DB,identity.id,archiveContext);
   if (await eodHash(input.analysis) !== input.capacity.analysisHash || !selected || !integer(priceBytes) || priceBytes <= 0
     || !integer(physicalBytes) || physicalBytes < priceBytes || !integer(headroom) || headroom < 10 || !digest(sourceSnapshotHash)
     || model.sharedTickers !== tickers.length || !storageFallbackModelValid(report, model, tickers.length)
@@ -97,6 +100,7 @@ export async function storeStorageHistoryMaintenanceApproval(env: Env, input: {
   const future = await env.MARKET_DATA_DB.prepare(`SELECT session_date FROM market_calendar_sessions
     WHERE session_date>? ORDER BY session_date LIMIT ?`).bind(input.publications.sessionDate, input.capacity.forecastSessions).all<{ session_date: string }>();
   if (future.results.length !== input.capacity.forecastSessions) fail("forecast-calendar-incomplete");
+  if(archiveContext && JSON.stringify(future.results.map(row=>row.session_date))!==JSON.stringify(archiveContext.forecastCalendarDates.slice(0,input.capacity.forecastSessions)))fail("forecast-calendar-mismatch");
   const lastCoveredSession = future.results.at(-1)!.session_date;
   const expiresAt = new Date(Date.parse(`${lastCoveredSession}T00:00:00Z`) + 86_400_000).toISOString();
   const proof: Approval["proof"] = { identity, tickerHash: await eodHash(tickers), tickers, publicationRunId: input.publications.runId,
@@ -107,6 +111,7 @@ export async function storeStorageHistoryMaintenanceApproval(env: Env, input: {
     capacity: input.capacity, model: { measuredAt: String(report.measuredAt), sourceSnapshotHash, priceTableAndIndexBytes: priceBytes,
       modeledPriceRows: Number(model.modeledSipRows) + Number(model.modeledFallbackRows), fullLayoutBytes: physicalBytes,
       hotSessions: input.capacity.hotSessions, sweepHeadroomSessions: headroom,
+      ...(archiveContext ? {currentArchiveForecast:storageAcceptedArchiveForecast(report,archiveContext,input.capacity.projectedHistoryBytes)} : {}),
       ...(model.fallbackStorage === EOD_YAHOO_ARCHIVE_LAYOUT ? { fallbackStorage: EOD_YAHOO_ARCHIVE_LAYOUT } : {}) },
     horizon: { anchorSession: input.publications.sessionDate, lastCoveredSession, expiresAt, sessions: input.capacity.forecastSessions } };
   const proofHash = await eodHash(proof), id = `history-storage-approval:${identity.codeRevision}`;
@@ -291,10 +296,12 @@ export async function refreshStorageHistoryMaintenanceEvidence(env: Env, input: 
     // This coefficient comes from exact populated SQLite table/index pages for
     // the approved full-width hot layout. No JSON-byte estimate or multiplier.
     const priceBytesPerRowBound = Math.ceil(proof.model.priceTableAndIndexBytes / proof.model.modeledPriceRows);
-    const additionalArchiveBytes = Math.max(0, proof.capacity.projectedHistoryBytes - proof.capacity.liveHistoryBytes);
+    const fixedArchive=proof.model.currentArchiveForecast
+      ? storageArchiveMonitorProjection(proof.model.currentArchiveForecast,proof.horizon,proof.capacity.projectedHistoryBytes,archivePhysicalBytes) : null;
+    const additionalArchiveBytes = fixedArchive?.additionalBytes ?? Math.max(0, proof.capacity.projectedHistoryBytes - proof.capacity.liveHistoryBytes);
     const projectedMarket = Math.max(proof.capacity.projectedMarketBytes,
       marketPhysicalBytes + remainingHotRows * priceBytesPerRowBound + proof.capacity.publicationGrowthReserveBytes);
-    const projectedHistory = Math.max(proof.capacity.projectedHistoryBytes, archivePhysicalBytes + additionalArchiveBytes);
+    const projectedHistory = fixedArchive?.projectedBytes ?? Math.max(proof.capacity.projectedHistoryBytes, archivePhysicalBytes + additionalArchiveBytes);
     const capacity: HistoryCapacityEvidence = { measuredAt: now.toISOString(), marketDatabaseBytes: marketPhysicalBytes,
       priceTableAndIndexBytes: proof.model.priceTableAndIndexBytes, priceRows: proof.model.modeledPriceRows,
       retainedPriceRows: proof.model.modeledPriceRows, archiveDatabaseBytes: archivePhysicalBytes, additionalArchiveBytes,

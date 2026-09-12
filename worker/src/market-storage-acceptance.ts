@@ -1,3 +1,4 @@
+import { validateStorageCurrentArchiveReport } from "./eod-current-archive-validation";
 import { z } from "zod";
 import { validateEodCatalogQuarantines } from "./eod-catalog-quarantine-validation";
 import { buildEodCatalogRow, EOD_CATALOG_METHODOLOGY_VERSION, EOD_CATALOG_SCOPE, loadEodCatalogRows } from "./eod-catalog-service";
@@ -387,6 +388,7 @@ export async function validateStorageCapacityAnalysis(input: {
   publications: StoragePublicationEvidence;
   /** Normal capacity renewal preserves the already approved hot layout. */
   hotSessions?: 260 | 90;
+  authorizeCurrentArchive?: (context: import("./eod-storage-layout").StorageCurrentArchiveContext) => Promise<void>;
 }): Promise<{ hotSessions: 260 | 90; projectedMarketBytes: number; projectedHistoryBytes: number;
   liveTargetBytes: number; liveHistoryBytes: number; publicationGrowthReserveBytes: number;
   forecastSessions: number; revisionsPerSession: number; analysisHash: string; measuredAt: string }> {
@@ -394,6 +396,14 @@ export async function validateStorageCapacityAnalysis(input: {
   const populationValue = object(report.population), archive = object(report.archive);
   const tickers = population(input.tickers), tickerHash = await eodHash(tickers), now = input.now ?? new Date();
   const measured = typeof report.measuredAt === "string" ? Date.parse(report.measuredAt) : NaN;
+  const archiveContext=await validateStorageCurrentArchiveReport(report,{codeRevision:input.identity.codeRevision,tickerHash,sourceSnapshotHash:input.sourceSnapshotSha256,sessionDate:input.publications.sessionDate});
+  if(archiveContext) {
+    const future=(await input.target.prepare("SELECT session_date FROM market_calendar_sessions WHERE session_date>? ORDER BY session_date LIMIT 40")
+      .bind(input.publications.sessionDate).all<{session_date:string}>()).results.map(row=>row.session_date);
+    if(JSON.stringify(future)!==JSON.stringify(archiveContext.forecastCalendarDates))fail("capacity-forecast-calendar-mismatch");
+    if(!input.authorizeCurrentArchive)fail("capacity-archive-authorization-required");
+    await input.authorizeCurrentArchive(archiveContext);
+  }
   if (report.version !== 1 || report.sessionDate !== input.identity.sessionDate || !Number.isFinite(measured)
     || measured > now.getTime() || now.getTime() - measured > 86_400_000
     || capture.kind !== "logical-d1-capacity-snapshot" || capture.completeDeclared !== true || capture.partialEstimate !== false

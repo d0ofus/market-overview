@@ -1,3 +1,4 @@
+import { validateStorageCurrentArchiveReport } from "./eod-current-archive-validation";
 import { z } from "zod";
 import { storageHash } from "./market-storage-pages";
 import type { StorageMigrationIdentity } from "./market-storage-control";
@@ -31,6 +32,8 @@ export async function prepareStoragePreflight(input: {
   analysis: unknown; identity: StorageMigrationIdentity; tickers: string[];
   snapshotSource: { accountId: string; sourceDatabaseId: string; runId: string };
   accountId: string; sourceSchemaHash: string; hotSessions?: 260 | 90; now?: Date;
+  /** Original migration identity remains historical; current model authorization is separate. */
+  executionRevision?: string;
 }) {
   const result = analysisSchema.safeParse(input.analysis);
   if (!result.success) throw new Error("storage-preflight-complete-analysis-required");
@@ -43,6 +46,7 @@ export async function prepareStoragePreflight(input: {
   const age = now.getTime() - Date.parse(report.measuredAt);
   if (age < 0 || age > 7 * 86_400_000) throw new Error("storage-preflight-measurement-expired");
   const tickers = [...input.tickers].sort();
+  await validateStorageCurrentArchiveReport(report,{codeRevision:input.executionRevision??input.identity.codeRevision,tickerHash:await storageHash(tickers),sourceSnapshotHash:report.source.snapshotSha256});
   if (tickers.length !== report.population.count || new Set(tickers).size !== tickers.length
     || tickers.some((ticker) => !/^[A-Z0-9.^/_-]{1,32}$/.test(ticker))
     || await storageHash(tickers) !== report.population.sha256) throw new Error("storage-preflight-population-mismatch");

@@ -16,13 +16,16 @@ import { inspectStorageCapacityRenewal, captureStorageCapacityInputs, assertStor
   claimStorageCapacityRenewal, progressStorageCapacityRenewal, finishStorageCapacityRenewal,
   storeRenewedStorageHistoryMaintenanceApproval, loadStorageCapacityRenewalStatus, type StorageCapacityRenewalStatus } from "../src/eod-storage-capacity-renewal";
 import { verifyStorageAcceptedPublications, collectStoragePublicationGrowthSamples, verifyStorageConsumerBatch,
-  storagePublicationGrowthReserve, validateStorageCapacityAnalysis, type StorageConsumerCheckpoint, type StorageConsumerEvidence,
+  storagePublicationGrowthReserve, validateStorageCapacityAnalysis, measureStorageLiveBytes, type StorageConsumerCheckpoint, type StorageConsumerEvidence,
   type StorageAcceptanceCapture } from "../src/market-storage-acceptance";
 import { eodHash } from "../src/eod-publication-service";
 import { classifyStorageFailure } from "../src/market-storage-failure";
 import { captureCapacityDatabase, flattenCapacityHistory } from "./eod-capacity-capture";
 import { createCapacityLocalSqlite } from "./eod-capacity-local-sqlite";
 import type { Env } from "../src/types";
+import { createStorageCurrentArchiveContext,storageArchiveFileHash,loadStorageForecastCalendar } from "./storage-current-archive-context";
+import { authenticateStorageRenewalArchiveContext } from "../src/eod-current-archive-validation";
+import { storageStartSnapshotHash } from "./storage-start-snapshot";
 
 const required = (name: string): string => { const value = process.env[name]?.trim(); if (!value) throw new Error(`eod-capacity-renewal-missing-${name.toLowerCase().replaceAll("_", "-")}`); return value; };
 const git = (...args: string[]) => execFileSync("git", args, { encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "pipe"], timeout: 10_000 }).trim();
@@ -101,14 +104,27 @@ async function main(): Promise<void> {
       progress: (value) => progress("capture-market", value) });
     await assertCurrent();
     await progress("capture-history");
-    await captureCapacityDatabase({ db: env.MARKET_HISTORY_DB!, kind: "history", file: historyFile, assertCurrent: assertRevisions,
+    const historyResult=await captureCapacityDatabase({ db: env.MARKET_HISTORY_DB!, kind: "history", file: historyFile, assertCurrent: assertRevisions,
       progress: (value) => progress("capture-history", value) });
     await assertCurrent();
+    const historyCapturedAt=new Date().toISOString(),historySnapshotSha256=await storageArchiveFileHash(historyFile);
+    const historyPhysicalBytes=await measureStorageLiveBytes(env.MARKET_HISTORY_DB!),historyPhysicalMeasuredAt=new Date().toISOString();
+    const receiptFields={version:1,kind:"capacity-renewal-current-archive",attemptId:status.attemptId,codeRevision,previousProofHash:previous.proofHash,capture,
+      historySnapshotSha256,historyRows:historyResult.rows,historyContentHash:historyResult.hash,historyCapturedAt,historyPhysicalBytes,historyPhysicalMeasuredAt};
+    const receiptHash=await eodHash(receiptFields),receipt={...receiptFields,evidenceHash:receiptHash},receiptKey=`storage-renewal-archive:${receiptHash}`;
+    await env.OPS_DB!.prepare("INSERT INTO eod_rollout_evidence(id,evidence_json,updated_at) VALUES(?,?,?) ON CONFLICT(id) DO NOTHING")
+      .bind(receiptKey,JSON.stringify(receipt),historyCapturedAt).run();
+    if(await env.OPS_DB!.prepare("SELECT evidence_json FROM eod_rollout_evidence WHERE id=?").bind(receiptKey).first<string>("evidence_json")!==JSON.stringify(receipt))
+      throw new Error("eod-capacity-renewal-history-receipt-conflict");
+    await assertCurrent();
     const localMarket = createCapacityLocalSqlite(marketFile), localHistory = createCapacityLocalSqlite(historyFile), reference = createCapacityLocalSqlite(referenceFile);
+    let localPriceRows:number|null=null;
     let consumers: StorageConsumerEvidence | null = null;
     const consumerCapture: StorageAcceptanceCapture = { identity, captureHash: await eodHash(capture),
       sourceCapture: capture.market, targetCapture: capture.market, historyCapture: capture.history };
     try {
+      localPriceRows=await localMarket.db.prepare("SELECT COUNT(*) AS rows FROM alpaca_daily_bars").first<number>("rows");
+      if(!Number.isSafeInteger(localPriceRows)||Number(localPriceRows)<=0)throw new Error("eod-capacity-renewal-source-count-invalid");
       await progress("reference-history");
       await flattenCapacityHistory({ market: localMarket, history: localHistory, reference,
         progress: (rows) => progress("reference-history", { rows }) });
@@ -144,13 +160,20 @@ async function main(): Promise<void> {
     const publicationGrowth: unknown = JSON.parse(readFileSync(growthFile, "utf8"));
     const reserve = storagePublicationGrowthReserve(publicationGrowth, { codeRevision, tickerHash: capture.populationHash, schemaHash: capture.market.schemaHash });
     await progress("physical-model", { publicationGrowthReserveBytes: reserve });
+    const archiveContext=await createStorageCurrentArchiveContext({historySnapshotSha256,historyCaptureHash:await eodHash(capture),
+      historyCapturedAt,historyPhysicalBytes,historyPhysicalMeasuredAt,historyReceiptHash:receiptHash,sourceSnapshotSha256:storageStartSnapshotHash(marketFile,directory),copySourceRows:Number(localPriceRows),
+      forecastSessionDate:capture.sessionDate,calendarDates:inputs.calendarDates,forecastCalendarDates:await loadStorageForecastCalendar(env.MARKET_DATA_DB!,capture.sessionDate),tickerHash:await eodHash(tickers),
+      authorization:{kind:"capacity-renewal",evidenceHash:previous.proofHash,codeRevision}});
+    const archiveContextFile=join(directory,"current-archive-context.json");writeFileSync(archiveContextFile,JSON.stringify(archiveContext),{flag:"wx"});
     python("analyze-eod-storage.py", ["--source-sqlite", marketFile, "--history-sqlite", historyFile, "--tickers-json", tickerFile,
-      "--session-date", capture.sessionDate, "--publication-growth-reserve-bytes", String(reserve), "--output", analysisFile]);
+      "--session-date", capture.sessionDate, "--publication-growth-reserve-bytes", String(reserve),
+      "--current-archive-context-json",archiveContextFile, "--output", analysisFile]);
     const analysis = JSON.parse(readFileSync(analysisFile, "utf8")) as { source: { snapshotSha256: string } };
     await assertCurrent(); await progress("validate-live-capacity");
     const capacity = await validateStorageCapacityAnalysis({ analysis, publicationGrowth, identity, tickers, sourceSchemaHash: capture.market.schemaHash,
       sourceSnapshotSha256: analysis.source.snapshotSha256, target: env.MARKET_DATA_DB!, history: env.MARKET_HISTORY_DB!, publications,
-      hotSessions: previous.proof.model.hotSessions });
+      hotSessions: previous.proof.model.hotSessions,
+      authorizeCurrentArchive:context=>authenticateStorageRenewalArchiveContext(env.OPS_DB!,context,{previousProofHash:previous.proofHash,attemptId:status!.attemptId,capture}) });
     // Every final read/write remains admitted against the current UTC and
     // rolling allowance. Flush settles and closes admission only in finally.
     await assertCurrent();

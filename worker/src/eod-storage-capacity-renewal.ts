@@ -1,3 +1,4 @@
+import { authenticateStorageRenewalArchiveContext,storageAcceptedArchiveForecast,validateStorageCurrentArchiveReport } from "./eod-current-archive-validation";
 import { eodHash } from "./eod-publication-service";
 import { loadEodInputs } from "./eod-runner";
 import { expectedEodSession, EOD_PUBLICATION_SCOPES } from "./eod-coordinator";
@@ -217,6 +218,8 @@ export async function storeRenewedStorageHistoryMaintenanceApproval(env: Env, in
     .some((value) => !Number.isFinite(age(value)) || age(value) < 0 || age(value) > 86_400_000)) fail("measurement-expired");
   const model = (Array.isArray(report.retentionModels) ? report.retentionModels.map(object) : []).find((row) => row.hotSessions === input.capacity.hotSessions);
   const database = object(model?.database), priceBytes = database.priceTableAndIndexBytes, physicalBytes = database.physicalBytes;
+  const archiveContext=await validateStorageCurrentArchiveReport(report,{codeRevision:identity.codeRevision,tickerHash:input.capture.populationHash,sourceSnapshotHash:String(object(report.source).snapshotSha256),sessionDate:input.capture.sessionDate});
+  if(archiveContext)await authenticateStorageRenewalArchiveContext(env.OPS_DB,archiveContext,{previousProofHash:previous.proofHash,attemptId:input.status.attemptId,capture:input.capture});
   if (!model || input.capacity.hotSessions !== previous.proof.model.hotSessions || input.capacity.hotSessions !== 90
     || await eodHash(report) !== input.capacity.analysisHash || !integer(priceBytes) || priceBytes <= 0
     || !integer(physicalBytes) || physicalBytes < priceBytes || !integer(model.sweepHeadroomSessions) || model.sweepHeadroomSessions < 10
@@ -230,6 +233,7 @@ export async function storeRenewedStorageHistoryMaintenanceApproval(env: Env, in
   const future = await env.MARKET_DATA_DB.prepare(`SELECT session_date FROM market_calendar_sessions WHERE session_date>? ORDER BY session_date LIMIT ?`)
     .bind(input.publications.sessionDate, input.capacity.forecastSessions).all<{ session_date: string }>();
   if (future.results.length !== input.capacity.forecastSessions) fail("forecast-calendar-incomplete");
+  if(archiveContext && JSON.stringify(future.results.map(row=>row.session_date))!==JSON.stringify(archiveContext.forecastCalendarDates.slice(0,input.capacity.forecastSessions)))fail("forecast-calendar-mismatch");
   const lastCoveredSession = future.results.at(-1)!.session_date;
   const proof = { identity, tickerHash: input.capture.populationHash, tickers, publicationRunId: input.publications.runId,
     consumerProofHash: input.consumers.evidenceHash, readers: { contractVersion: input.consumers.readerContractVersion,
@@ -237,6 +241,7 @@ export async function storeRenewedStorageHistoryMaintenanceApproval(env: Env, in
     capacity: input.capacity, model: { measuredAt: String(report.measuredAt), sourceSnapshotHash: String(object(report.source).snapshotSha256),
       priceTableAndIndexBytes: priceBytes, modeledPriceRows: Number(model.modeledSipRows) + Number(model.modeledFallbackRows),
       fullLayoutBytes: physicalBytes, hotSessions: input.capacity.hotSessions, sweepHeadroomSessions: model.sweepHeadroomSessions,
+      ...(archiveContext ? {currentArchiveForecast:storageAcceptedArchiveForecast(report,archiveContext,input.capacity.projectedHistoryBytes)} : {}),
       ...(model.fallbackStorage === EOD_YAHOO_ARCHIVE_LAYOUT ? { fallbackStorage: EOD_YAHOO_ARCHIVE_LAYOUT } : {}) },
     horizon: { anchorSession: input.publications.sessionDate, lastCoveredSession, expiresAt: new Date(Date.parse(`${lastCoveredSession}T00:00:00Z`) + 86_400_000).toISOString(), sessions: input.capacity.forecastSessions },
     renewal: { version: 1, attemptId: input.status.attemptId, previousProofHash: previous.proofHash, previousReaders: previous.proof.readers,

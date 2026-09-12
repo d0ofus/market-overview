@@ -11,7 +11,11 @@ const protectedPaths=["worker/src/eod-price-provider.ts","worker/src/eod-ticker-
   "worker/src/market-storage-atomic-manifest.ts","worker/src/market-storage-population-expansion.ts",
   "worker/src/market-storage-consumer-composite.ts","worker/src/market-storage-listing-execution.ts",
   "worker/src/eod-metrics.ts","worker/src/eod-listing-evidence.ts","worker/wrangler.toml","package-lock.json"];
-const historical=(path:string)=>readFileSync(resolve(root,path),"utf8");
+// Exact reviewed R20 source, kept locally so shallow/offline checkouts exercise
+// the historical contract without fetching Git objects or today's implementation.
+const frozen=JSON.parse(readFileSync(resolve(root,"worker/test/fixtures/repair-code-contract-r20.json"),"utf8")) as {version:number;revision:string;sources:Record<string,string>};
+if(frozen.version!==1||frozen.revision!=="e52602a8a610711bff18426793b54623aadfdffa")throw new Error("invalid-frozen-repair-contract");
+const historical=(path:string)=>{const source=frozen.sources[path];if(typeof source!=="string")throw new Error("missing-frozen-repair-source");return source;};
 const digest=(value:string)=>createHash("sha1").update(value).digest("hex");
 function fixture() {
   const integrationSources=Object.fromEntries(Object.keys(STORAGE_REPAIR_INTEGRATION_HASHES).map(path=>[path,historical(path)]));

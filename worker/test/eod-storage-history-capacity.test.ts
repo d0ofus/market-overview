@@ -112,6 +112,33 @@ describe("archive-first measured layout maintenance", { timeout: 30_000 }, () =>
     await expect(refreshHistoryMaintenanceEvidence(env, { tickers, codeRevision: revision, now: expired })).rejects.toThrow("forecast-horizon-expired");
     expect(await loadStorageHistoryCapacityStatus(env, expired)).toMatchObject({ status: "expired", horizonExpiresAt: approved.proof.horizon.expiresAt });
   });
+  it("counts realized growth once under an accepted current-archive peak while retaining reserves and expiry",async()=>{
+    await seed("sip",1);const prior=await approve(90);
+    const reserve=4*1024*1024,projection=330_000_000;
+    const envelope={version:1 as const,policy:"verified-current-archive-forecast-v1" as const,contextHash:"9".repeat(64),
+      anchorSession:prior.proof.horizon.anchorSession,lastForecastSession:prior.proof.horizon.lastCoveredSession,
+      physicalPeakBytes:projection-2*reserve,liveAllocationAllowanceBytes:0,failedWriteReserveBytes:reserve,transientReserveBytes:reserve,projectionBytes:projection};
+    const proof={...prior.proof,capacity:{...prior.proof.capacity,projectedHistoryBytes:projection,liveHistoryBytes:160_000_000},
+      model:{...prior.proof.model,currentArchiveForecast:envelope}};
+    const approved={...prior,proof,proofHash:await eodHash(proof)};
+    await ops.db.prepare("UPDATE eod_rollout_evidence SET evidence_json=? WHERE id=?")
+      .bind(JSON.stringify(approved),`history-storage-approval:${revision}`).run();
+    let actualArchiveBytes=220_000_000;
+    env.MARKET_HISTORY_DB={...history.db,prepare(sql:string){const statement=history.db.prepare(sql);
+      if(sql!=="SELECT 1 AS history_capacity_probe")return statement;
+      return {...statement,all:async()=>{const result=await statement.all();return {...result,meta:{...result.meta,size_after:actualArchiveBytes}};}} as D1PreparedStatement;
+    }} as D1Database;
+    const current=await refreshHistoryMaintenanceEvidence(env,{tickers,codeRevision:revision,now});
+    expect(current.capacity.archiveDatabaseBytes).toBe(actualArchiveBytes);
+    expect(current.capacity.additionalArchiveBytes).toBe(projection-actualArchiveBytes);
+    expect(current.capacity.liveProjection?.archiveBytes).toBe(projection);
+    actualArchiveBytes=350_000_000-2*reserve;
+    await expect(refreshHistoryMaintenanceEvidence(env,{tickers,codeRevision:revision,now})).rejects.toThrow("below 350 MB");
+    actualArchiveBytes=220_000_000;
+    await expect(refreshHistoryMaintenanceEvidence(env,{tickers,codeRevision:revision,now:new Date(proof.horizon.expiresAt)})).rejects.toThrow("forecast-horizon-expired");
+    expect(JSON.parse((await ops.db.prepare("SELECT evidence_json FROM eod_rollout_evidence WHERE id=?")
+      .bind(`history-storage-approval:${revision}`).first<string>("evidence_json"))!)).toEqual(approved);
+  });
   it("resumes the unfinished provider sample after quota failure and preserves the accepted model", async () => {
     await seed("sip", 1); await seed("yahoo-eod", 2); const approved = await approve(90);
     failSample = 2;

@@ -57,15 +57,15 @@ export async function captureCapacityDatabase(input: {
           while (offset < ids.length) {
             const selected: StorageRow[] = [];
             let bound = 0;
-            // Eight is also below the adapter's conservative 250k admission
-            // reservation for unlabelled archive/calendar SELECTs.
+            // Retain the eight-statement transport bound; exact primary-key
+            // reads use the existing narrow accounting class below.
             while (offset < ids.length && selected.length < 8) {
               const estimate = Math.max(4096, Number(ids[offset].uncompressed_bytes) * 2 + 4096);
               if (selected.length && bound + estimate > 6_000_000) break;
               selected.push(ids[offset++]); bound += estimate;
             }
             const response = await input.db.batch<StorageRow>(selected.map((row) => input.db.prepare(
-              `SELECT ${table.columns.map(quoteStorageIdentifier).join(",")} FROM market_history_blocks WHERE id=?`).bind(row.id)));
+              `SELECT ${table.columns.map(quoteStorageIdentifier).join(",")} FROM market_history_blocks WHERE id=? /* storage-archive-point-read */`).bind(row.id)));
             for (let index = 0; index < response.length; index++) {
               const result = response[index].results;
               if (result.length !== 1 || result[0].id !== selected[index].id) throw new Error("eod-capacity-capture-block-disappeared");

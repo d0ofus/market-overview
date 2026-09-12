@@ -12,6 +12,7 @@ import { loadStorageMigration, loadStorageMigrationCheckpoint, storageMigrationI
 import { assertStorageExecutionRevision } from "../src/market-storage-execution";
 import { loadStorageValidationPlan } from "../src/market-storage-population-plan";
 import { loadStorageHistoryIndexAmendment } from "../src/market-storage-history-index-recovery";
+import { loadStorageCapacityCaptureReuse } from "../src/market-storage-capacity-execution";
 import { createStorageWorkflowQuiescence } from "../src/market-storage-github-revocation";
 import { prepareStoragePreflight } from "../src/market-storage-preflight";
 import { verifyStorageExpansionBaseline } from "../src/market-storage-population-expansion";
@@ -23,6 +24,7 @@ import { captureCapacityDatabase } from "./eod-capacity-capture";
 import { captureStoragePopulationDelta, runStoragePopulationDeltaProof, loadStorageExpansionHistoryReceipt,
   storeStorageExpansionHistoryReceipt, type StorageExpansionHistoryReceipt } from "./eod-population-expansion-operator";
 import type { Env } from "../src/types";
+import { prepareStorageExpansionArchiveContext } from "./storage-current-archive-context";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const required = (name: string) => { const value = process.env[name]?.trim(); if (!value) throw new Error("storage-expansion-setting-missing"); return value; };
@@ -95,6 +97,7 @@ async function main(): Promise<void> {
       if (variable.get(name) !== value) throw new Error("storage-expansion-github-identity-conflict");
     }
     const previous = await loadStorageValidationPlan(ops, run);
+    const capacityReuse = await loadStorageCapacityCaptureReuse(ops, run, previous);
     // A lost promotion response is recoverable without creating another delta.
     if (previous.predecessorPlanHash === expectedPlanHash && previous.populationExpansionHash) {
       const proof = await loadStoragePlanConsumerProof(ops, run, previous);
@@ -110,15 +113,17 @@ async function main(): Promise<void> {
       if (replay.status !== "already-promoted") throw new Error("storage-expansion-replay-receipt-required");
       const nextInputsHash = await storageHash(previous.inputs), directory = resolve(directoryRoot,
         `${expectedPlanHash}-${nextInputsHash}-${proof.delta.capture.captureHash}`);
-      const receipt = await loadStorageExpansionHistoryReceipt(ops, { migrationId: id, codeRevision, previousPlanHash: expectedPlanHash,
+      const receipt = capacityReuse?.receipt ?? await loadStorageExpansionHistoryReceipt(ops, { migrationId: id, codeRevision, previousPlanHash: expectedPlanHash,
         nextInputsHash, captureHash: proof.delta.capture.captureHash, historyDatabaseId: historyId });
-      if (!receipt || receipt.directory !== directory || await fileHash(resolve(directory, receipt.file)) !== receipt.fileHash) {
+      if (capacityReuse && (capacityReuse.continuation.planHash!==expectedPlanHash||capacityReuse.continuation.nextInputsHash!==nextInputsHash
+        ||capacityReuse.continuation.capture.captureHash!==proof.delta.capture.captureHash)) throw new Error("storage-expansion-capacity-reuse-conflict");
+      if (!receipt || (!capacityReuse && receipt.directory !== directory) || await fileHash(resolve(receipt.directory, receipt.file)) !== receipt.fileHash) {
         throw new Error("storage-expansion-replay-history-artifact-required");
       }
       console.log(JSON.stringify({ status: "population-expansion-already-approved", planHash: previous.planHash,
         expansionHash: previous.populationExpansionHash, tickerCount: previous.tickers.length, consumerProofHash: proof.evidenceHash,
         promotionReceiptHash: replay.receipt.evidenceHash, historyReceiptHash: receipt.evidenceHash,
-        historySnapshotPath: resolve(directory, receipt.file), historySnapshotHash: receipt.fileHash, historyCaptureDate: receipt.capturedAt,
+        historySnapshotPath: resolve(receipt.directory, receipt.file), historySnapshotHash: receipt.fileHash, historyCaptureDate: receipt.capturedAt,
         analysisPath: resolve(directory, "storage-analysis.json"), productionAcceptance: false })); return;
     }
     if (previous.planHash !== expectedPlanHash) throw new Error("storage-expansion-selected-plan-changed");
@@ -159,6 +164,9 @@ async function main(): Promise<void> {
     if (!amendment) throw new Error("storage-expansion-history-amendment-required");
     const captureInput = { source, target, history, run, previousPlan: previous, amendment };
     const captured = await captureStoragePopulationDelta(captureInput);
+    if (capacityReuse && (capacityReuse.continuation.planHash!==previous.planHash||capacityReuse.continuation.nextInputsHash!==nextHash
+      ||capacityReuse.continuation.inputClock!==captured.inputClock
+      ||await storageHash(capacityReuse.continuation.capture)!==await storageHash(captured.capture))) throw new Error("storage-expansion-capacity-reuse-changed");
     const assertDeltaCapture = async () => {
       if (await storageHash(await captureStoragePopulationDelta(captureInput)) !== await storageHash(captured)) throw new Error("storage-expansion-capture-changed");
     };
@@ -171,7 +179,7 @@ async function main(): Promise<void> {
     mkdirSync(directory, { recursive: true });
     immutableLocal(resolve(directory, "selection.json"), { version: 1, migrationId: id, codeRevision, previousPlanHash: expectedPlanHash,
       sessionDate: session, nextInputsHash: nextHash, tickers: [...nextInputs.tickers].sort(), addedTickers, captured });
-    const delta = await runStoragePopulationDeltaProof({ ops, run, previousPlan: previous, nextInputsHash: nextHash,
+    const delta = capacityReuse ? {complete:true,evidence:capacityReuse.delta.evidence} : await runStoragePopulationDeltaProof({ ops, run, previousPlan: previous, nextInputsHash: nextHash,
       sourceEnv: { ...env, DB: source, MARKET_DATA_DB: source, MARKET_HISTORY_DB: undefined }, targetEnv: env,
       capture: captured.capture, addedTickers, assertCapture: assertDeltaCapture, assertQuiescence: assertNoWorkflowWriters });
     if (!delta.complete || !delta.evidence) throw new Error("storage-expansion-delta-incomplete");
@@ -182,11 +190,11 @@ async function main(): Promise<void> {
     const historyIdentity = { migrationId: id, codeRevision, previousPlanHash: expectedPlanHash,
       nextInputsHash: nextHash, captureHash: captured.capture.captureHash, historyDatabaseId: historyId };
     let historyFile: string, receipt: StorageExpansionHistoryReceipt;
-    const savedReceipt = await loadStorageExpansionHistoryReceipt(ops, historyIdentity);
+    const savedReceipt = capacityReuse?.receipt ?? await loadStorageExpansionHistoryReceipt(ops, historyIdentity);
     if (savedReceipt) {
       receipt = savedReceipt;
-      historyFile = resolve(directory, receipt.file);
-      if (receipt.directory !== directory || receipt.captureHash !== captured.capture.captureHash
+      historyFile = resolve(receipt.directory, receipt.file);
+      if ((!capacityReuse && receipt.directory !== directory) || receipt.captureHash !== captured.capture.captureHash
         || await fileHash(historyFile) !== receipt.fileHash) throw new Error("storage-expansion-history-artifact-changed");
       immutableLocal(receiptPath, receipt);
       await assertCurrent();
@@ -206,17 +214,24 @@ async function main(): Promise<void> {
     }
     const tickerPath = resolve(directory, "tickers.json"), analysisPath = resolve(directory, "storage-analysis.json"), sizingPath = resolve(directory, "prepared-sizing.json");
     immutableLocal(tickerPath, { tickers: [...nextInputs.tickers].sort() });
+    const currentArchive=await prepareStorageExpansionArchiveContext({ops,target,run,plan:previous,inputs:nextInputs,historyFile,sourceFile:sourceSnapshot,temporaryRoot:directoryRoot});
+    const archiveContextPath=resolve(directory,"current-archive-context.json");
+    if(currentArchive)immutableLocal(archiveContextPath,currentArchive);
     if (!existsSync(analysisPath)) {
       await assertCurrent();
       command("python", [resolve(root, "worker/scripts/analyze-eod-storage.py"), "--source-sqlite", sourceSnapshot,
-        "--history-sqlite", historyFile, "--tickers-json", tickerPath, "--session-date", run.session_date, "--output", analysisPath], 45 * 60_000);
+        "--history-sqlite", historyFile, "--tickers-json", tickerPath, "--session-date", run.session_date,
+        ...(currentArchive?["--current-archive-context-json",archiveContextPath]:[]), "--output", analysisPath], 45 * 60_000);
       await assertCurrent();
     }
     const analysis = read(analysisPath), copy = (await loadStorageMigrationCheckpoint(ops, id, "verification:complete"))?.payload as { prices?: { sourceRows?: number } };
     if (object(object(analysis)?.source)?.snapshotSha256 !== previous.sourceSnapshotHash
-      || object(object(analysis)?.archive)?.sourceRows !== copy?.prices?.sourceRows) throw new Error("storage-expansion-original-source-model-mismatch");
+      || (currentArchive ? object(object(analysis)?.archive)?.verifiedCopySourceRows !== copy?.prices?.sourceRows
+        || await storageHash(object(object(object(analysis)?.archive)?.currentArchiveForecast)?.context)!==await storageHash(currentArchive)
+        : object(object(analysis)?.archive)?.sourceRows !== copy?.prices?.sourceRows)) throw new Error("storage-expansion-original-source-model-mismatch");
     let preparedSizing = await prepareStoragePreflight({ analysis, identity: storageMigrationIdentity(run), tickers: [...nextInputs.tickers].sort(),
-      snapshotSource, accountId, sourceSchemaHash: previous.capture.sourceCapture.schemaHash, hotSessions: 90 });
+      snapshotSource, accountId, sourceSchemaHash: previous.capture.sourceCapture.schemaHash, hotSessions: 90,
+      ...(currentArchive?{executionRevision:codeRevision}:{}) });
     if (existsSync(sizingPath)) {
       const saved = read(sizingPath) as typeof preparedSizing;
       if (await storageHash(saved.evidence) !== saved.hash || saved.evidence.analysisHash !== preparedSizing.evidence.analysisHash

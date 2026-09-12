@@ -10,9 +10,11 @@ vi.mock("../src/eod-price-repair",() => ({repairEodSecurity:mocks.repair}));
 import { runEodHistoryWork } from "../src/eod-history-runner";
 import * as capacity from "../src/eod-history-capacity";
 import * as maintenance from "../src/eod-history-maintenance";
+import * as storageCapacity from "../src/eod-storage-history-capacity";
+import { loadEodDeepHistoryBudget } from "../src/eod-deep-history-admission";
 
 describe("bounded durable history requests",{timeout:30_000},() => {
-  let market:ReturnType<typeof createSqliteD1>,ops:ReturnType<typeof createSqliteD1>,env:Env;
+  let market:ReturnType<typeof createSqliteD1>,ops:ReturnType<typeof createSqliteD1>,history:ReturnType<typeof createSqliteD1>,env:Env;
   const session="2026-09-04";
   const calendar=Array.from({length:1600},(_,index) => {
     const date=new Date(`${session}T00:00:00Z`);date.setUTCDate(date.getUTCDate()-1599+index);return date.toISOString().slice(0,10);
@@ -21,13 +23,16 @@ describe("bounded durable history requests",{timeout:30_000},() => {
   const bar=(ticker:string,date=session) => ({ticker,date,c:100,o:100,h:101,l:99,volume:100,reportedVolume:100,
     feed:"sip",sourceProvider:"alpaca",adjustment:"split",observedAt:`${session}T21:00:00Z`,fetchedAt:`${session}T21:00:00Z`});
   beforeEach(() => {
-    vi.clearAllMocks();market=createSqliteD1();ops=createSqliteD1();
-    market.migrate("market-data-migrations");ops.migrate("ops-migrations");
-    env={DB:market.db,MARKET_DATA_DB:market.db,MARKET_HISTORY_DB:market.db,OPS_DB:ops.db} as Env;
+    vi.clearAllMocks();market=createSqliteD1();ops=createSqliteD1();history=createSqliteD1();
+    market.migrate("market-data-migrations");ops.migrate("ops-migrations");history.migrate("history-migrations");
+    env={DB:market.db,MARKET_DATA_DB:market.db,MARKET_HISTORY_DB:history.db,OPS_DB:ops.db} as Env;
+    vi.spyOn(storageCapacity,"refreshApprovedStorageHistoryCapacity").mockResolvedValue({sample:{proofHash:"fixture"}} as NonNullable<Awaited<ReturnType<typeof storageCapacity.refreshApprovedStorageHistoryCapacity>>>);
+    vi.spyOn(storageCapacity,"loadStorageHistoryMaintenanceApproval").mockResolvedValue({proofHash:"fixture",proof:{
+      tickers:["SPY","QQQ","BNRG","AAA","BBB","CCC","DDD",...Array.from({length:101},(_,index)=>`SEC${index}`)]}} as NonNullable<Awaited<ReturnType<typeof storageCapacity.loadStorageHistoryMaintenanceApproval>>>);
     mocks.load.mockResolvedValue([]);mocks.archive.mockResolvedValue({revisionChanges:[]});mocks.repair.mockResolvedValue({bars:[],revisions:[]});
     mocks.alpaca.mockImplementation(async (tickers:string[]) => tickers.map((ticker) => bar(ticker)));
   },30_000);
-  afterEach(() => {market.dispose();ops.dispose();});
+  afterEach(() => {vi.restoreAllMocks();market.dispose();ops.dispose();history.dispose();});
 
   it("defaults full-population history to520 and reports missing coverage without inferring listing age",async () => {
     const result=await runEodHistoryWork(env,input());
@@ -39,6 +44,76 @@ describe("bounded durable history requests",{timeout:30_000},() => {
     const result=await runEodHistoryWork(env,{...input(),historySessions:1400});
     expect(mocks.alpaca).toHaveBeenCalledWith(["SPY"],calendar.at(-1400),session);
     expect(result.historySessions).toBe(1400);
+  });
+  it("keeps whole 1400-session requests and defers the second security without shortening it",async () => {
+    const work={...input(),tickers:["AAA","BBB"],historySessions:1400 as const};
+    const result=await runEodHistoryWork(env,work);
+    expect(mocks.alpaca).toHaveBeenCalledWith(["AAA"],calendar.at(-1400),session);
+    expect(mocks.alpaca.mock.calls.every(([tickers])=>!tickers.includes("BBB"))).toBe(true);
+    expect(result.deepWork).toMatchObject({maxSecurities:4,maxObservations:2500,chargedObservations:1400,admittedSecurities:1,
+      deferred:{BBB:"weekly-history-budget-deferred"},blocked:{}});
+    expect(result.deepWork.nextAttemptAt).toMatch(/T00:00:00.000Z$/);
+    await runEodHistoryWork(env,work);
+    expect((await loadEodDeepHistoryBudget(ops.db)).observations).toBe(1400);
+  });
+  it("charges the full retained repair span rather than only the requested 520 sessions",async () => {
+    await market.db.prepare("INSERT INTO eod_adjustment_repairs(feed,ticker,status,owner_token,start_date,updated_at) VALUES('sip','SPY','pending','owner',?,?)")
+      .bind(calendar[0],`${session}T21:00:00Z`).run();
+    mocks.load.mockResolvedValue(calendar.slice(-520).map(date=>bar("SPY",date)));
+    const result=await runEodHistoryWork(env,input());
+    expect(mocks.repair).toHaveBeenCalledTimes(1);
+    expect(result.deepWork.chargedObservations).toBe(1600);
+  });
+  it("retains exact weekly deferrals when resuming after an interrupted earlier chunk",async () => {
+    const tickers=Array.from({length:11},(_,index)=>`SEC${index}`),work={...input(),tickers};
+    await expect(runEodHistoryWork(env,{...work,progress:async(_stage,value)=>{
+      if((value as {nextTicker:number}).nextTicker===10)throw new Error("planned-interruption");
+    }})).rejects.toThrow("planned-interruption");
+    const saved=JSON.parse((await ops.db.prepare("SELECT payload_json FROM eod_checkpoints WHERE run_id=? AND chunk_key='history:cursor'")
+      .bind(work.runId).first<string>("payload_json"))!);
+    expect(saved).toMatchObject({nextTicker:10,missing:{SEC9:"weekly-history-budget-deferred"}});
+    const resumed=await runEodHistoryWork(env,work);
+    expect(resumed.deepWork.deferred).toEqual(Object.fromEntries(tickers.slice(4).map(ticker=>[ticker,"weekly-history-budget-deferred"])));
+    expect(resumed.deepWork.nextAttemptAt).not.toBeNull();
+    expect(resumed.deepWork.chargedObservations).toBe(2080);
+    expect(resumed.missing.SEC0).toContain("519 expected sessions unavailable");
+    expect(resumed.deepWork.deferred.SEC0).toBeUndefined();
+  });
+  it("does not promise next-week repair when one retained span exceeds the hard weekly maximum",async () => {
+    const full=Array.from({length:2502},(_,index)=>new Date(Date.parse(`${session}T00:00:00Z`)-(2501-index)*86400_000).toISOString().slice(0,10));
+    await market.db.prepare("INSERT INTO market_calendar_sessions(session_date,open_at,close_at,source) SELECT value,'09:30','16:00','fixture' FROM json_each(?)")
+      .bind(JSON.stringify(full)).run();
+    await market.db.prepare("INSERT INTO eod_adjustment_repairs(feed,ticker,status,owner_token,start_date,updated_at) VALUES('sip','SPY','pending','owner',?,?)")
+      .bind(full[0],`${session}T21:00:00Z`).run();
+    const result=await runEodHistoryWork(env,input());
+    expect(result.deepWork).toMatchObject({chargedObservations:0,nextAttemptAt:null,
+      blocked:{SPY:"history-request-exceeds-weekly-capacity"}});
+    expect(mocks.repair).not.toHaveBeenCalled();expect(mocks.alpaca).not.toHaveBeenCalled();
+    expect(await market.db.prepare("SELECT status,start_date FROM eod_adjustment_repairs WHERE feed='sip' AND ticker='SPY'").first())
+      .toEqual({status:"pending",start_date:full[0]});
+  });
+  it("does no deep provider work without a current capacity approval",async () => {
+    vi.mocked(storageCapacity.refreshApprovedStorageHistoryCapacity).mockResolvedValue(null);
+    await expect(runEodHistoryWork(env,input())).rejects.toThrow("capacity-approval-required");
+    expect(mocks.alpaca).not.toHaveBeenCalled();expect(mocks.repair).not.toHaveBeenCalled();
+    expect((await loadEodDeepHistoryBudget(ops.db)).observations).toBe(0);
+  });
+  it("keeps a selected identity outside the approved population visibly blocked without provider work",async () => {
+    const result=await runEodHistoryWork(env,{...input(),tickers:["UNMEASURED"],historySessions:1400});
+    expect(result).toMatchObject({historySessions:1400,coverageStatus:"partial",missing:{UNMEASURED:"history-population-capacity-required"},
+      deepWork:{chargedObservations:0,nextAttemptAt:null,blocked:{UNMEASURED:"history-population-capacity-required"}}});
+    expect(mocks.alpaca).not.toHaveBeenCalled();expect(mocks.repair).not.toHaveBeenCalled();expect(mocks.archive).not.toHaveBeenCalled();
+    expect(mocks.load).toHaveBeenCalledWith(env,expect.objectContaining({tickers:[]}));
+  });
+  it("prunes the complete population even when the weekly deep-work budget defers members",async () => {
+    const tickers=Array.from({length:10},(_,index)=>`SEC${index}`);
+    vi.spyOn(capacity,"refreshHistoryMaintenanceEvidence").mockResolvedValue({hotSessions:90,feeds:["sip"],capacity:{},readers:{},sample:{}} as never);
+    const prune=vi.spyOn(maintenance,"archiveAndPruneMarketHistory").mockResolvedValue({status:"complete",cursor:null,archivedRows:0,deletedRows:0,concurrentCorrections:0});
+    vi.spyOn(maintenance,"cleanupUnpointedHistoryBlocks").mockResolvedValue({status:"complete",cursor:null,deletedBlocks:0});
+    const result=await runEodHistoryWork({...env,EOD_ARCHIVE_PRUNE_ENABLED:"true"},{...input(),tickers,reconcileHistory:true});
+    expect(result.deepWork.chargedObservations).toBe(2080);
+    expect(Object.keys(result.deepWork.deferred)).toHaveLength(6);
+    expect(prune).toHaveBeenCalledWith(expect.anything(),expect.objectContaining({tickers}));
   });
   it("rejects broad1400-session expansion before provider work",async () => {
     await expect(runEodHistoryWork(env,{...input(),historySessions:1400,tickers:Array.from({length:101},(_,i) => `S${i}`)}))

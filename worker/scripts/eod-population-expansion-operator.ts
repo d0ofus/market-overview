@@ -71,6 +71,38 @@ type DeltaPage = { version: 1; selectionHash: string; captureHash: string; previ
 const deltaKey = (id: string, selection: string, capture: string, page: number) =>
   `storage-expansion-delta:${id}:${selection}:${capture}:${page}`;
 
+/** Read-only reuse of a completed, independently dated delta proof. Missing
+ * pages never start new reader work under a different executor identity. */
+export async function loadCompletedStoragePopulationDelta(input: {
+  ops: D1Database; migrationId: string; previousPlanHash: string; nextInputsHash: string;
+  capture: StorageAcceptanceCapture; addedTickers: string[];
+}): Promise<{ evidence: StorageConsumerEvidence; checkpoint: StorageConsumerCheckpoint;
+  selectionHash: string; records: Array<{ id: string; payload: string }> }> {
+  if (![input.previousPlanHash, input.nextInputsHash].every(value => digest.test(value))
+    || input.addedTickers.length < 1 || input.addedTickers.length > 100
+    || new Set(input.addedTickers).size !== input.addedTickers.length) fail("completed-selection-invalid");
+  const selectionHash = await storageHash([input.previousPlanHash, input.nextInputsHash, [...input.addedTickers].sort()]);
+  const records: Array<{ id: string; payload: string }> = [];
+  let previous: DeltaPage | null = null;
+  const pages = Math.ceil(input.addedTickers.length / 10);
+  for (let page = 1; page <= pages; page++) {
+    const id = deltaKey(input.migrationId, selectionHash, input.capture.captureHash, page);
+    const payload = await input.ops.prepare("SELECT evidence_json FROM eod_rollout_evidence WHERE id=?").bind(id).first<string>("evidence_json");
+    if (!payload) fail("completed-delta-missing");
+    let value: DeltaPage;
+    try { value = JSON.parse(payload) as DeltaPage; } catch { fail("completed-delta-json-invalid"); }
+    const { recordHash, ...fields } = value!;
+    if (value!.version !== 1 || recordHash !== await storageHash(fields) || value!.selectionHash !== selectionHash
+      || value!.captureHash !== input.capture.captureHash || value!.previousHash !== (previous?.recordHash ?? null)
+      || value!.checkpoint.nextTicker !== Math.min(page * 10, input.addedTickers.length)
+      || Boolean(value!.evidence) !== (page === pages)) fail("completed-delta-integrity");
+    records.push({ id, payload }); previous = value!;
+  }
+  if (!previous?.evidence) fail("completed-delta-missing");
+  await validateStorageConsumerEvidence(previous.evidence, input.capture, input.addedTickers);
+  return { evidence: previous.evidence, checkpoint: previous.checkpoint, selectionHash, records };
+}
+
 export type StorageExpansionHistoryIdentity = { migrationId: string; codeRevision: string; previousPlanHash: string;
   nextInputsHash: string; captureHash: string; historyDatabaseId: string };
 export type StorageExpansionHistoryReceipt = StorageExpansionHistoryIdentity & { version: 1; directory: string; file: string;

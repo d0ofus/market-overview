@@ -24,6 +24,9 @@ TRANSIENT_ARCHIVE_BYTES = 4 * 1024 * 1024
 FALLBACK_LAYOUT = "archive-only-bounded-v1"
 FALLBACK_CAPACITY = 1_000
 FALLBACK_SESSIONS = 320
+CURRENT_ARCHIVE_POLICY = "verified-current-archive-forecast-v1"
+DEEP_HISTORY_MAX_SECURITIES = 4
+DEEP_HISTORY_MAX_OBSERVATIONS = 2_500
 BAR_FIELDS = ("feed", "ticker", "date", "o", "h", "l", "c", "volume", "fetched_at",
               "source_provider", "adjustment", "observed_at", "reported_volume", "reported_volume_collected_at")
 BLOCK_FIELDS = ("id", "feed", "ticker", "calendar_year", "schema_version", "codec", "checksum", "row_count",
@@ -407,6 +410,284 @@ def archive_fallback_model(archive: sqlite3.Connection, codec: Codec, tickers: l
             "roundTripPassed":True,"measurementMethod":"sqlite-real-history-codec-v1"}
 
 
+def current_archive_context(path: Path, history_path: Path, source_hash: str, tickers: list[str]) -> dict[str, Any]:
+    context = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(context, dict):
+        raise AnalysisError("Current archive context must be an authenticated object.")
+    unsigned = {key: value for key, value in context.items() if key != "evidenceHash"}
+    encoded = json.dumps(unsigned, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
+    dates = context.get("calendarDates", [])
+    auth = context.get("authorization", {})
+    expected_keys = {"version", "policy", "historySnapshotSha256", "historyCaptureHash", "historyCapturedAt", "historyReceiptHash", "historyPhysicalBytes", "historyPhysicalMeasuredAt", "sourceSnapshotSha256", "copySourceRows", "forecastSessionDate", "calendarDates", "forecastCalendarDates", "tickerHash", "authorization", "evidenceHash"}
+    if set(context) != expected_keys or not isinstance(auth, dict) or set(auth) != {"kind", "evidenceHash", "codeRevision"}:
+        raise AnalysisError("Current archive context contains unexpected fields.")
+    hashes = [context.get(key) for key in ("historySnapshotSha256", "historyCaptureHash", "historyReceiptHash", "sourceSnapshotSha256", "tickerHash")]
+    hashes.append(auth.get("evidenceHash"))
+    valid_hash = lambda value: isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+    if (context.get("version") != 1 or context.get("policy") != CURRENT_ARCHIVE_POLICY
+            or hashlib.sha256(encoded).hexdigest() != context.get("evidenceHash") or not all(map(valid_hash, hashes))
+            or context["sourceSnapshotSha256"] != source_hash or context["historySnapshotSha256"] != digest_file(history_path)
+            or context["tickerHash"] != hashlib.sha256(json.dumps(tickers, separators=(",", ":")).encode()).hexdigest()
+            or type(context.get("copySourceRows")) is not int or context["copySourceRows"] <= 0
+            or auth.get("kind") not in ("population-expansion", "capacity-renewal")
+            or not isinstance(auth.get("codeRevision"), str) or len(auth["codeRevision"]) != 40
+            or any(c not in "0123456789abcdef" for c in auth["codeRevision"])
+            or not isinstance(dates, list) or not 1400 <= len(dates) <= 2000 or any(not isinstance(value,str) for value in dates) or sorted(set(dates)) != dates
+            or dates[-1] != context.get("forecastSessionDate")):
+        raise AnalysisError("Current archive context identity/hash/file/calendar verification failed.")
+    for value in dates:
+        if date.fromisoformat(value).isoformat() != value:
+            raise AnalysisError("Current archive calendar has an invalid date.")
+    future = context["forecastCalendarDates"]
+    if not isinstance(future,list) or len(future) != 40 or any(not isinstance(value,str) for value in future) or sorted(set(future)) != future or future[0] <= context["forecastSessionDate"]:
+        raise AnalysisError("Current archive forecast needs exactly40 authoritative future sessions.")
+    for value in future:
+        if date.fromisoformat(value).isoformat() != value:
+            raise AnalysisError("Current archive future calendar has an invalid date.")
+    captured_at = datetime.fromisoformat(context["historyCapturedAt"].replace("Z", "+00:00"))
+    if captured_at.tzinfo is None or captured_at > datetime.now(timezone.utc):
+        raise AnalysisError("Current archive capture timestamp is invalid or in the future.")
+    measured_at = datetime.fromisoformat(context["historyPhysicalMeasuredAt"].replace("Z", "+00:00"))
+    if (type(context.get("historyPhysicalBytes")) is not int or context["historyPhysicalBytes"] <= 0
+            or measured_at.tzinfo is None or measured_at < captured_at or measured_at > datetime.now(timezone.utc)):
+        raise AnalysisError("Current archive physical allocation evidence is invalid.")
+    return context
+
+
+def archive_current_forecast(source: sqlite3.Connection, archive: sqlite3.Connection, codec: Codec,
+                             tickers: list[str], context: dict[str, Any], measured_at: str) -> dict[str, Any]:
+    """Actual captured allocation plus a disposable, finite writer forecast.
+
+    Existing current/previous/orphan blocks are verified first. Only an obsolete
+    predecessor displaced by our verified pointer CAS can be deleted, exactly
+    as in the writer. Existing orphans are never removed. No VACUUM is used.
+    Original source prices are counted separately, never overlaid on accepted
+    corrections or relabelled as the later, independently verified source copy.
+    """
+    # This function receives only the disposable forecast connection. Durability
+    # of this regenerable local simulation is irrelevant; B-tree allocation,
+    # foreign keys, CAS and read-back checks are unchanged. Never apply to inputs.
+    archive.execute("PRAGMA synchronous=OFF")
+    archive.execute("PRAGMA journal_mode=MEMORY")
+    archive.execute("PRAGMA foreign_keys=ON")
+    invalid = archive.execute("""SELECT 1 FROM market_history_block_pointers p
+      LEFT JOIN market_history_blocks b ON b.id=p.block_id
+      LEFT JOIN market_history_blocks previous ON previous.id=p.previous_block_id
+      WHERE b.id IS NULL OR b.verified_at IS NULL OR b.feed<>p.feed OR b.ticker<>p.ticker OR b.calendar_year<>p.calendar_year
+        OR (p.previous_block_id IS NOT NULL AND (previous.id IS NULL OR previous.verified_at IS NULL
+          OR previous.feed<>p.feed OR previous.ticker<>p.ticker OR previous.calendar_year<>p.calendar_year)) LIMIT 1""").fetchone()
+    if invalid:
+        raise AnalysisError("Current archive has an invalid current/previous pointer.")
+    existing_blocks = 0
+    for block in archive.execute("SELECT * FROM market_history_blocks"):
+        codec.call({"block": block_value(block)})
+        existing_blocks += 1
+        if existing_blocks % 2_000 == 0:
+            print(json.dumps({"phase":"current-archive-checksums","verifiedBlocks":existing_blocks}),file=sys.stderr,flush=True)
+    orphan_ids = {row[0] for row in archive.execute("""SELECT id FROM market_history_blocks b
+      WHERE NOT EXISTS (SELECT 1 FROM market_history_block_pointers p WHERE p.block_id=b.id OR p.previous_block_id=b.id)""")}
+    initial = measure(archive)
+    page_size = initial["pageSize"]
+    peak = initial["physicalBytes"]
+    peak_stage = "verified-capture"
+    largest_allocations: list[int] = []
+    phases: list[dict[str, Any]] = []
+    deleted = inserted = 0
+    # Daily full-universe coverage remains 260 sessions. Deep maintenance has a
+    # separate enforced account-wide weekly securities/observation envelope.
+    # Reserve every intersecting UTC week, including the starting partial week.
+    future = context["forecastCalendarDates"]
+    start = date.fromisoformat(context["forecastSessionDate"])
+    finish = date.fromisoformat(future[-1])
+    weeks = (finish - timedelta(days=finish.weekday()) - (start-timedelta(days=start.weekday()))).days//7+1
+    deep_requested_observations = weeks*DEEP_HISTORY_MAX_OBSERVATIONS
+    deep_names = sorted(tickers, key=lambda ticker: (-len(ticker),ticker))[:weeks*DEEP_HISTORY_MAX_SECURITIES]
+    retained_starts={row[0]:row[1] for row in archive.execute("""SELECT p.ticker,MIN(b.first_date)
+      FROM market_history_block_pointers p JOIN market_history_blocks b ON b.id=p.block_id
+      WHERE p.feed='sip' GROUP BY p.ticker""")}
+    deep_calendars={}
+    for ticker in deep_names:
+        days=list(context["calendarDates"][-1400:])
+        cursor=date.fromisoformat(retained_starts.get(ticker,days[0]))
+        until=date.fromisoformat(days[0])
+        while cursor<until:
+            if cursor.weekday()<5:
+                days.append(cursor.isoformat())
+            cursor+=timedelta(days=1)
+        deep_calendars[ticker]=sorted(set(days))
+    deep_capacity=sum(map(len,deep_calendars.values()))
+    deep_observations=min(deep_requested_observations,deep_capacity)
+    deep_allocations={ticker:0 for ticker in deep_names}
+    remaining=deep_observations
+    while remaining:
+        eligible=[ticker for ticker in deep_names if deep_allocations[ticker]<len(deep_calendars[ticker])]
+        share=(remaining+len(eligible)-1)//len(eligible)
+        for ticker in eligible:
+            allocation=min(share,len(deep_calendars[ticker])-deep_allocations[ticker],remaining)
+            deep_allocations[ticker]+=allocation
+            remaining-=allocation
+    deep_dates_by_ticker: dict[str,list[str]] = {}
+    primary_dates = context["calendarDates"][-260:] + future
+    fallback_dates = context["calendarDates"][-280:] + future
+    existing_yahoo = {row[0] for row in archive.execute("SELECT DISTINCT ticker FROM market_history_blocks WHERE feed='yahoo-eod'")}
+    if len(existing_yahoo) > FALLBACK_CAPACITY:
+        raise AnalysisError("Existing fallback identities exceed the enforced capacity.")
+    added_yahoo = sorted(set(tickers)-existing_yahoo, key=lambda ticker: (-len(ticker),ticker))[:max(0,FALLBACK_CAPACITY-len(existing_yahoo))]
+    yahoo = sorted(existing_yahoo | set(added_yahoo))
+    securities = [("sip", ticker) for ticker in tickers] + [("yahoo-eod", ticker) for ticker in yahoo]
+
+    def checkpoint(stage: str):
+        nonlocal peak, peak_stage
+        physical = archive.execute("PRAGMA page_count").fetchone()[0]*page_size
+        if physical > peak:
+            peak, peak_stage = physical, stage
+        return physical
+
+    def fixture(feed: str, ticker: str, day: str, generation: int):
+        noise = hashlib.sha256(f"current-archive-forecast:{ticker}:{day}".encode()).digest()
+        values = [int.from_bytes(noise[i:i+8],"big")/2**64 for i in (0,8,16,24)]
+        opening, close = 100+values[0]*100, 100+values[1]*100
+        volume = int.from_bytes(noise[:4],"big")
+        if day in future:
+            # Daily appended observations are collected on separate sessions,
+            # unlike one historical batch. Keep the actual ISO millisecond
+            # fields and a distinct subsequent raw-volume collection time.
+            milliseconds=int.from_bytes(noise[6:8],"big")%1000
+            observed=datetime.fromisoformat(day).replace(hour=23,minute=noise[4]%60,second=noise[5]%60,microsecond=milliseconds*1000,tzinfo=timezone.utc)
+            stamp=observed.isoformat(timespec="milliseconds").replace("+00:00","Z")
+            raw_stamp=(observed+timedelta(seconds=1)).isoformat(timespec="milliseconds").replace("+00:00","Z")
+        else:
+            stamp = context["forecastSessionDate"]+f"T23:59:{58+generation-1:02d}.999Z"
+            raw_stamp=stamp
+        return {"ticker":ticker,"date":day,"o":opening,"h":max(opening,close)+values[2]*10,
+                "l":min(opening,close)-values[3]*10,"c":close,"volume":volume,
+                "reportedVolume":volume if feed=="sip" else None,
+                **({"reportedVolumeCollectedAt":raw_stamp} if feed=="sip" else {}),
+                "feed":feed,"sourceProvider":"alpaca" if feed=="sip" else "yahoo","adjustment":"split",
+                "observedAt":stamp,"fetchedAt":stamp}
+
+    for generation in (1,2):
+        for feed,ticker in securities:
+            pointers = {row["calendar_year"]: row for row in archive.execute(
+                "SELECT * FROM market_history_block_pointers WHERE feed=? AND ticker=? ORDER BY calendar_year", (feed,ticker))}
+            groups: dict[int,dict[str,dict[str,Any]]] = {}
+            for year,pointer in pointers.items():
+                stored = archive.execute("SELECT * FROM market_history_blocks WHERE id=?",(pointer["block_id"],)).fetchone()
+                groups[year] = {bar["date"]:bar for bar in codec.call({"block":block_value(stored)})["bars"]}
+            for day in primary_dates if feed=="sip" else fallback_dates:
+                values = groups.setdefault(int(day[:4]),{})
+                if day not in values:
+                    values[day] = fixture(feed,ticker,day,generation)
+                elif feed=="sip" and day in future and values[day].get("reportedVolume") is None:
+                    added = fixture(feed,ticker,day,generation)
+                    values[day] = {**values[day],"reportedVolume":added["reportedVolume"],
+                                   "reportedVolumeCollectedAt":added["reportedVolumeCollectedAt"]}
+            if feed=="sip" and ticker in deep_allocations:
+                # Treat each charged observation as an additional full-width
+                # stored observation (more conservative than charging already
+                # present request overlap). Spread across older calendar years
+                # to include actual per-year B-tree/pointer allocation.
+                if ticker not in deep_dates_by_ticker:
+                    years: dict[int,list[str]] = {}
+                    for day in deep_calendars[ticker]:
+                        years.setdefault(int(day[:4]),[]).append(day)
+                    candidates=[]
+                    while any(years.values()):
+                        for values in years.values():
+                            if values:
+                                candidates.append(values.pop(0))
+                    existing_dates={day for values in groups.values() for day in values}
+                    candidates.sort(key=lambda day: (day in existing_dates,day in primary_dates))
+                    if deep_allocations[ticker] > len(candidates):
+                        raise AnalysisError("Deep forecast observation envelope exceeds the supplied calendar.")
+                    deep_dates_by_ticker[ticker]=candidates[:deep_allocations[ticker]]
+                for day in deep_dates_by_ticker[ticker]:
+                    groups.setdefault(int(day[:4]),{})[day]=fixture(feed,ticker,day,generation)
+            for year,values in sorted(groups.items()):
+                # Both generations must really allocate; never count a reused
+                # checksum or timestamp-only INSERT OR IGNORE as spare capacity.
+                bars = [dict(values[day]) for day in sorted(values)]
+                last = bars[-1]
+                last["volume"] = (last.get("volume") or 0)+generation
+                if feed=="sip":
+                    last["reportedVolume"] = (last.get("reportedVolume") or 0)+generation
+                encoded = codec.call({"bars":bars})
+                if encoded.get("equal") is not True:
+                    raise AnalysisError("Current archive fixture changed during normalization.")
+                block = encoded["block"]
+                old = pointers.get(year)
+                if archive.execute("SELECT 1 FROM market_history_blocks WHERE id=?",(block["id"],)).fetchone():
+                    raise AnalysisError("Current archive forecast revision unexpectedly deduplicated.")
+                sql_values=(block["id"],feed,ticker,year,block["schemaVersion"],block["codec"],block["checksum"],block["rowCount"],
+                            block["firstDate"],block["lastDate"],block["uncompressedBytes"],block["payloadBase64"],measured_at,measured_at)
+                archive.execute(f"INSERT INTO market_history_blocks({','.join(BLOCK_FIELDS)}) VALUES({','.join('?' for _ in BLOCK_FIELDS)})",sql_values)
+                inserted += 1
+                checkpoint(f"generation-{generation}-insert-before-cas")
+                stored = archive.execute("SELECT * FROM market_history_blocks WHERE id=?",(block["id"],)).fetchone()
+                if codec.call({"block":block_value(stored)})["bars"] != bars:
+                    raise AnalysisError("Current archive forecast read-back differs.")
+                if old:
+                    changed = archive.execute("""UPDATE market_history_block_pointers SET block_id=?,previous_block_id=?,updated_at=?
+                      WHERE feed=? AND ticker=? AND calendar_year=? AND block_id=?""",
+                      (block["id"],old["block_id"],measured_at,feed,ticker,year,old["block_id"])).rowcount
+                else:
+                    changed = archive.execute("""INSERT INTO market_history_block_pointers
+                      (feed,ticker,calendar_year,block_id,previous_block_id,updated_at) VALUES(?,?,?,?,NULL,?)""",
+                      (feed,ticker,year,block["id"],measured_at)).rowcount
+                if changed != 1:
+                    raise AnalysisError("Current archive forecast pointer CAS lost.")
+                checkpoint(f"generation-{generation}-cas-before-cleanup")
+                if old and old["previous_block_id"] and old["previous_block_id"] not in (old["block_id"],block["id"]):
+                    obsolete = old["previous_block_id"]
+                    if obsolete in orphan_ids:
+                        raise AnalysisError("A captured orphan became an obsolete predecessor.")
+                    deleted += archive.execute("""DELETE FROM market_history_blocks WHERE id=? AND NOT EXISTS
+                      (SELECT 1 FROM market_history_block_pointers WHERE block_id=? OR previous_block_id=?)""",
+                      (obsolete,obsolete,obsolete)).rowcount
+                # Payload plus a conservative per-object page allowance measures
+                # one stranded candidate per security in an interrupted25-name
+                # chunk. This is a finite failed-write reserve, not an assurance
+                # of uninterrupted delivery under unlimited failed operations.
+                largest_allocations.append(((len(block["payloadBase64"].encode())+page_size-1)//page_size+6)*page_size)
+                largest_allocations=sorted(largest_allocations,reverse=True)[:25]
+            archive.commit()
+        phases.append({"generation":generation,"physicalBytes":checkpoint(f"generation-{generation}-complete"),"insertedBlocks":inserted,"deletedPredecessors":deleted})
+        print(json.dumps({"phase":"current-archive-forecast",**phases[-1]}),file=sys.stderr,flush=True)
+    if any(not archive.execute("SELECT 1 FROM market_history_blocks WHERE id=?",(value,)).fetchone() for value in orphan_ids):
+        raise AnalysisError("Current archive forecast removed captured orphan history.")
+    final = measure(archive)
+    failed_reserve=max(TRANSIENT_ARCHIVE_BYTES,sum(largest_allocations))
+    live_allocation_allowance=max(0,context["historyPhysicalBytes"]-initial["physicalBytes"])
+    projection=peak+live_allocation_allowance+failed_reserve+TRANSIENT_ARCHIVE_BYTES
+    source_rows=source.execute("SELECT COUNT(*) FROM alpaca_daily_bars").fetchone()[0]
+    feeds={row[0]:row[1] for row in source.execute("SELECT feed,COUNT(*) FROM alpaca_daily_bars GROUP BY feed")}
+    forecast={"version":1,"policy":CURRENT_ARCHIVE_POLICY,"context":context,"baselinePhysicalBytes":initial["physicalBytes"],
+      "baselineFreePageBytes":initial["freePageBytes"],"existingBlocksVerified":existing_blocks,"existingOrphanBlocks":len(orphan_ids),
+      "preservedOrphanBlocks":len(orphan_ids),"primaryTickers":len(tickers),"primaryHistorySessions":260,"forecastSessions":40,
+      "primaryModeledSessions":len(primary_dates),"fallbackModeledSessions":len(fallback_dates),"futureRevisionGenerations":2,
+      "deepHistory":{"policy":"weekly-observation-and-security-cap-v1","utcWeeks":weeks,"securitiesPerWeek":DEEP_HISTORY_MAX_SECURITIES,
+        "observationsPerWeek":DEEP_HISTORY_MAX_OBSERVATIONS,"reservedSecurities":len(deep_names),"reservedRequestedObservations":deep_requested_observations,
+        "reservedObservations":deep_observations,"selectedHistorySessions":1400,
+        "retainedSpanExtraSessionSlots":deep_capacity-len(deep_names)*1400,"retainedSpanPreserved":True},
+      "physicalPeakBytes":peak,"physicalPeakStage":peak_stage,"finalPhysicalBytes":final["physicalBytes"],
+      "liveAllocationAllowanceBytes":live_allocation_allowance,
+      "failedWriteChunkSecurities":25,"failedWriteReserveBytes":failed_reserve,"transientReserveBytes":TRANSIENT_ARCHIVE_BYTES,
+      "projectionBytes":projection,"phases":phases,"roundTripPassed":True,"vacuumUsed":False,
+      "measurementMethod":"sqlite-current-archive-writer-forecast-v1"}
+    fallback={"storage":FALLBACK_LAYOUT,"capacityTickers":FALLBACK_CAPACITY,"existingTickers":len(existing_yahoo),
+      "existingTickersOutsidePopulation":len(existing_yahoo-set(tickers)),"modeledAdditionalTickers":len(added_yahoo),
+      "totalReservedTickers":len(yahoo),"tickerHash":hashlib.sha256(json.dumps(yahoo,separators=(",",":")).encode()).hexdigest(),
+      "sessions":len(fallback_dates),"modeledRows":len(yahoo)*len(fallback_dates),"physicalBytesBefore":initial["physicalBytes"],
+      "physicalBytesAfter":final["physicalBytes"],"roundTripPassed":True,"measurementMethod":"sqlite-real-history-codec-v1"}
+    return {"sourceRows":source_rows,"sourceRowsByFeed":feeds,"verifiedCopySourceRows":context["copySourceRows"],
+      "checkedSourceRows":0,"sourceOverlayApplied":False,"existingBlocksVerified":existing_blocks,
+      "newBlocks":inserted,"storedBlocks":archive.execute("SELECT COUNT(*) FROM market_history_blocks").fetchone()[0],
+      "activeBlocks":archive.execute("SELECT COUNT(*) FROM market_history_block_pointers").fetchone()[0],
+      "database":final,"sourceOnlyDatabase":initial,"fallbackReserve":fallback,"currentArchiveForecast":forecast,
+      "withAdditionalCompleteRevisionAndTransientBytes":projection,"storageRoundTripPassed":True,"consumerParityVerified":False,
+      "reserveDefinition":"Measured verified current archive writer peak, two grown revisions with exact predecessor GC,25-security failed-write reserve and4MiB transient; no VACUUM/source overlay."}
+
+
 def make_seed(source: sqlite3.Connection, path: Path, session: str) -> sqlite3.Connection:
     result = sqlite3.connect(path)
     result.row_factory = sqlite3.Row
@@ -504,12 +785,14 @@ def capture_metadata(source: sqlite3.Connection, source_path: Path, allow_partia
 
 def analyze(source_path: Path, tickers: list[str], session: str, history_path: Path | None = None,
             headroom: int = 10, publication_reserve: int = 0, fallback_reserve: int | None = None,
-            allow_partial: bool = False) -> dict[str, Any]:
+            allow_partial: bool = False, current_archive_context_path: Path | None = None) -> dict[str, Any]:
     if date.fromisoformat(session).isoformat() != session or headroom < 10 or publication_reserve < 0:
         raise AnalysisError("Use an ISO session date, at least 10 sessions of sweep headroom and a nonnegative publication reserve.")
     if not tickers or len(set(tickers)) != len(tickers):
         raise AnalysisError("All unique frozen shared tickers are required.")
     archive_only = fallback_reserve is None
+    if current_archive_context_path and (not history_path or not archive_only):
+        raise AnalysisError("Current archive forecasting requires the complete history snapshot and archive-only layout.")
     fallback_reserve = len(tickers) if fallback_reserve is None else fallback_reserve
     if fallback_reserve < 0 or fallback_reserve > len(tickers):
         raise AnalysisError("Fallback reserve must be between zero and the full shared population.")
@@ -523,7 +806,11 @@ def analyze(source_path: Path, tickers: list[str], session: str, history_path: P
         seed = None
         codec = None
         try:
+            # Preserve the original plan's normalized SQLite backup identity.
+            # Raw input-file headers can have a different change counter; the
+            # operator context producer performs this same consistent backup.
             original_snapshot_hash = digest_file(workspace / "source.sqlite")
+            current_context = current_archive_context(current_archive_context_path, history_path, original_snapshot_hash, tickers) if current_archive_context_path else None
             capture = capture_metadata(source, source_path, allow_partial)
             actual = {row["name"] for row in source.execute("PRAGMA table_info(alpaca_daily_bars)")}
             if actual != set(BAR_FIELDS):
@@ -535,12 +822,19 @@ def analyze(source_path: Path, tickers: list[str], session: str, history_path: P
                 # Existing snapshots may predate the additive FK indexes. The
                 # disposable model must include their real pages and insertion
                 # cost without altering the supplied historical evidence file.
-                archive.executescript((ROOT / "history-migrations/0003_history_pointer_indexes.sql").read_text(encoding="utf8"))
+                if current_context:
+                    indexes = {row["name"]: row for row in archive.execute("PRAGMA index_list(market_history_block_pointers)")}
+                    for name, column in (("idx_market_history_pointers_block_id", "block_id"),
+                                         ("idx_market_history_pointers_previous_block_id", "previous_block_id")):
+                        if name not in indexes or indexes[name]["partial"] or indexes[name]["unique"] or [row["name"] for row in archive.execute(f"PRAGMA index_info({name})")] != [column]:
+                            raise AnalysisError("Current archive capture must already contain both exact pointer indexes.")
+                else:
+                    archive.executescript((ROOT / "history-migrations/0003_history_pointer_indexes.sql").read_text(encoding="utf8"))
             source_size = measure(source)
             schema = [dict(row) for row in source.execute("SELECT name,type,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY name")]
             codec = Codec()
-            archive_result = archive_all(source, archive, codec, now)
-            if archive_only:
+            archive_result = archive_current_forecast(source, archive, codec, tickers, current_context, now) if current_context else archive_all(source, archive, codec, now)
+            if archive_only and not current_context:
                 fallback = archive_fallback_model(archive,codec,tickers,session,now)
                 archive_result["sourceOnlyDatabase"] = archive_result["database"]
                 archive_result["database"] = fallback.pop("database")
@@ -595,6 +889,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-sqlite", type=Path, required=True)
     parser.add_argument("--history-sqlite", type=Path)
+    parser.add_argument("--current-archive-context-json", type=Path, help="Authenticated current archive receipt and copy lineage; keeps the cold-source model unchanged when omitted.")
     parser.add_argument("--tickers-json", type=Path, required=True)
     parser.add_argument("--session-date", required=True)
     parser.add_argument("--sweep-headroom-sessions", type=int, default=10)
@@ -605,12 +900,12 @@ def main() -> int:
     args = parser.parse_args()
     try:
         inputs = [args.source_sqlite, Path(str(args.source_sqlite) + ".metadata.json"), args.tickers_json,
-                  *([args.history_sqlite] if args.history_sqlite else [])]
+                  *([args.history_sqlite] if args.history_sqlite else []), *([args.current_archive_context_json] if args.current_archive_context_json else [])]
         if args.output.resolve() in [path.resolve() for path in inputs]:
             raise AnalysisError("Output must not overwrite any input snapshot or ticker manifest.")
         report = analyze(args.source_sqlite, load_tickers(args.tickers_json), args.session_date, args.history_sqlite,
                          args.sweep_headroom_sessions, args.publication_growth_reserve_bytes,
-                         args.fallback_ticker_reserve, args.allow_partial_estimate)
+                         args.fallback_ticker_reserve, args.allow_partial_estimate, args.current_archive_context_json)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf8")
         print(json.dumps({"report": str(args.output.resolve()), "sourceRows": report["archive"]["sourceRows"],
