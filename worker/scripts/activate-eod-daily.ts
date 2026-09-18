@@ -106,7 +106,7 @@ async function main() {
       for (const ticker of checkTickers) {
         const [before,after]=await Promise.all([
           loadMarketHistory({...env,MARKET_DATA_DB:source},{tickers:[ticker],feed:"sip",endDate:copy.identity.sessionDate}),
-          loadMarketHistory(env,{tickers:[ticker],feed:"sip",endDate:copy.identity.sessionDate}),
+          loadMarketHistory(env,{tickers:[ticker],feed:"sip",endDate:copy.identity.sessionDate,allowPendingAdjustmentRepair:true}),
         ]);
         const retained=new Map(after.map(row=>[row.date,row]));
         if (before.some(row=>!retained.has(row.date))) throw new Error(`eod-release-observation-lost:${ticker}`);
@@ -115,7 +115,7 @@ async function main() {
           const repair=await market.prepare(`SELECT r.status,v.last_correction_revision AS revision FROM eod_adjustment_repairs r
             JOIN eod_input_revisions v ON v.feed=r.feed AND v.ticker=r.ticker WHERE r.feed='sip' AND r.ticker=?`)
             .bind(ticker).first<{status:string;revision:number}>();
-          if (repair?.status!=="complete" || repair.revision<1) throw new Error(`eod-release-untracked-correction:${ticker}`);
+          if (!repair || !["pending","complete"].includes(repair.status) || repair.revision<1) throw new Error(`eod-release-untracked-correction:${ticker}`);
         }
         preservation.push({ticker,sourceObservations:before.length,retainedObservations:after.length,
           trackedCorrectionDates:corrected.map(row=>row.date)});
