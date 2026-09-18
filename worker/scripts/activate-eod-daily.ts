@@ -10,7 +10,7 @@ import type { StorageVerificationEvidence } from "../src/market-storage-verifica
 import { eodHash } from "../src/eod-publication-service";
 import { EOD_METRICS_VERSION } from "../src/eod-metrics";
 import { EOD_PUBLICATION_SCOPES } from "../src/eod-publication-scopes";
-import { EOD_CATALOG_SCOPE, loadEodCatalogRows, type EodCatalogPayload } from "../src/eod-catalog-service";
+import { EOD_CATALOG_SCOPE, type EodCatalogPayload } from "../src/eod-catalog-service";
 import { decodeEodPayload, type EodStoredPayload } from "../src/eod-publication-codec";
 import { MARKET_HISTORY_REQUIRED_CONSUMERS } from "../src/eod-history-maintenance";
 import { eodStoragePolicy } from "../src/eod-storage-policy";
@@ -81,11 +81,15 @@ async function main() {
         .all<EodStoredPayload & {id:string;scope:string;session_date:string;checksum:string;methodologyVersion:string}>();
       const selected=EOD_PUBLICATION_SCOPES.map(scope=>publications.results.find(row=>row.scope===scope));
       for (const row of selected) if (!row || row.methodologyVersion!==EOD_METRICS_VERSION || await eodHash(await decodeEodPayload(row))!==row.checksum) throw new Error("eod-release-publication-integrity");
-      const catalog=await market.prepare("SELECT payload_json FROM eod_publications WHERE scope=? AND session_date=? AND status='accepted' ORDER BY revision DESC LIMIT 1")
-        .bind(EOD_CATALOG_SCOPE,run.session_date).first<string>("payload_json");
-      const catalogPayload=JSON.parse(catalog ?? "null") as EodCatalogPayload;
-      if (!catalogPayload?.rows || catalogPayload.rows.length!==inputs.tickers.length) throw new Error("eod-release-full-catalog-required");
-      await loadEodCatalogRows(env,catalogPayload.rows.filter(row=>row.length===10).map(row=>row[0]),run.session_date);
+      const catalog=await market.prepare("SELECT payload_json,payload_checksum FROM eod_publications WHERE scope=? AND session_date=? AND status='accepted' ORDER BY revision DESC LIMIT 1")
+        .bind(EOD_CATALOG_SCOPE,run.session_date).first<{payload_json:string;payload_checksum:string}>();
+      const catalogPayload=JSON.parse(catalog?.payload_json ?? "null") as EodCatalogPayload;
+      if (!catalogPayload?.rows || catalogPayload.rows.length!==inputs.tickers.length
+        || await eodHash(catalogPayload)!==catalog?.payload_checksum) throw new Error("eod-release-full-catalog-required");
+      // This is an immutable, explicitly dated snapshot. Current corrections
+      // can supersede its input revisions without invalidating copied storage.
+      // Final recording still requires a current six-scope publication and
+      // completed input watermark; retention checks the current catalog too.
       const checkTickers=["SPY","QQQ","IWM","DIA","AAPL","MSFT","NVDA","BRK.B"].filter(ticker=>inputs.tickers.includes(ticker));
       const calendar=(await market.prepare("SELECT session_date FROM market_calendar_sessions WHERE session_date<=? ORDER BY session_date")
         .bind(copy.identity.sessionDate).all<{session_date:string}>()).results.map(row=>row.session_date);
