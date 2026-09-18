@@ -6,6 +6,7 @@ import { expectedEodSession } from "./eod-coordinator";
 import { decodeEodPayload, type EodStoredPayload } from "./eod-publication-codec";
 import { EOD_METRICS_VERSION } from "./eod-metrics";
 import type { Env } from "./types";
+import { zonedParts } from "./refresh-timing";
 
 const PROVIDER_LABEL = "Split-adjusted daily prices: Alpaca SIP, coherent Yahoo fallback; reported volume: Alpaca SIP.";
 
@@ -398,9 +399,18 @@ export async function loadBreadthDashboard(env: Env, historyLimitInput = 120, no
     const sourceMix = displayed.sourceMix && typeof displayed.sourceMix === "object" ? displayed.sourceMix as Record<string, unknown> : {};
     const stale = displayed.asOfDate !== expectedAsOfSession;
     const lowCoverage = coveragePct < requiredCoveragePct;
-    const verifiedAt = typeof membership.verifiedAt === "string" && Number.isFinite(Date.parse(membership.verifiedAt)) ? membership.verifiedAt : null;
+    const rawVerifiedAt = typeof membership.verifiedAt === "string" ? membership.verifiedAt : null;
+    // D1 CURRENT_TIMESTAMP is UTC without a suffix. A post-close verification
+    // can fall on the next UTC date while still belonging to this publication.
+    const verifiedTime = rawVerifiedAt ? Date.parse(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(rawVerifiedAt)
+      ? `${rawVerifiedAt.replace(" ", "T")}Z` : rawVerifiedAt) : NaN;
+    const validVerification = Number.isFinite(verifiedTime) && verifiedTime <= now.getTime()
+      && verifiedTime <= Date.parse(current.createdAt);
+    const verifiedAt = rawVerifiedAt && Number.isFinite(verifiedTime) ? rawVerifiedAt : null;
     const sourceAsOfDate = typeof membership.sourceAsOfDate === "string" ? membership.sourceAsOfDate : null;
-    const verifiedDate = verifiedAt?.slice(0,10) ?? sourceAsOfDate;
+    const localVerificationDate = validVerification ? zonedParts(new Date(verifiedTime), "America/New_York").localDate : null;
+    const verifiedDate = localVerificationDate ? (localVerificationDate > displayed.asOfDate ? displayed.asOfDate : localVerificationDate)
+      : rawVerifiedAt ? null : sourceAsOfDate;
     const sourceAgeSessions = verifiedDate === displayed.asOfDate ? 0
       : verifiedDate && verifiedDate <= displayed.asOfDate && calendarDates[0] && verifiedDate >= calendarDates[0]
         ? calendarDates.filter((date) => date > verifiedDate && date <= displayed.asOfDate).length : null;

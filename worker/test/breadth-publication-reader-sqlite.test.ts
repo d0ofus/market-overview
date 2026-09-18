@@ -59,4 +59,25 @@ describe("bounded Breadth publication reader against SQLite", {timeout:20_000}, 
     expect(nasdaq.membership).toMatchObject({sourceAgeSessions:0,degraded:false});
     expect(nasdaq.history.map((row) => row.asOfDate)).toEqual(["2026-09-03","2026-09-08"]);
   });
+
+  it("dates post-close membership verification in New York and rejects timestamps after publication or now", async () => {
+    for (const universe of universes) await publish(universe, "2026-09-09");
+    for (const [universe, verified, published] of [
+      ["sp500-core", "2026-09-10 03:42:38", "2026-09-10T04:00:00.000Z"],
+      ["russell2000-core", "2026-09-10T04:30:00.000Z", "2026-09-10T04:45:00.000Z"],
+      ["nasdaq-core", "2026-09-10T06:00:00.000Z", "2026-09-10T07:00:00.000Z"],
+      ["nyse-core", "2026-09-10T03:00:00.000Z", "2026-09-09T22:00:00.000Z"],
+    ]) {
+      await storage.db.prepare("UPDATE eod_publications SET payload_json=json_set(payload_json,'$.membership.verifiedAt',?),created_at=? WHERE id=?")
+        .bind(verified, published, `${universe}:2026-09-09:1`).run();
+    }
+    const env = { DB: storage.db, MARKET_DATA_DB: storage.db, EOD_READ_ENABLED: "true" } as Env;
+    const dashboard = await loadBreadthDashboard(env, 5, new Date("2026-09-10T05:00:00.000Z"));
+    for (const universe of ["sp500-core", "russell2000-core"]) {
+      expect(dashboard.universes.find(row => row.universeId === universe)?.membership).toMatchObject({ sourceAgeSessions: 0, degraded: false });
+    }
+    for (const universe of ["nasdaq-core", "nyse-core"]) {
+      expect(dashboard.universes.find(row => row.universeId === universe)?.membership).toMatchObject({ sourceAgeSessions: null, degraded: true });
+    }
+  });
 });
