@@ -341,6 +341,12 @@ export function estimateEodQueries(queries: readonly EodSql[]): { reads: number;
       reads += tickers.length * (offset + 10) * 2 + 64;
       continue;
     }
+    if (query.sql.trimEnd().endsWith("/* eod-retention-revisions */")) {
+      const tickers: unknown = JSON.parse(String(query.params[0]));
+      if (!Array.isArray(tickers) || tickers.length > 10_000) throw new Error("eod-retention-selection-invalid");
+      reads += tickers.length * 10 + 64;
+      continue;
+    }
     if (query.sql.trimEnd().endsWith("/* eod-retention-candidates */")) {
       const limit = Number(query.params[4]);
       if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error("eod-retention-selection-invalid");

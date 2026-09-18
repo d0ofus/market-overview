@@ -14,7 +14,8 @@ export type EodPublicationStatus = {
     storage: { status: string; checkedAt: string | null; accountBytes: number | null; marketBytes: number | null; historyBytes: number | null;
       limits: { accountWarningBytes: number; accountOptionalStopBytes: number } };
     maintenance: { sessionDate: string; updatedAt: string; completedAt: string | null; startedAt: string;
-      deletedRows: number; archivedRows: number; deferredRepairCount: number; pending: boolean } | null;
+      deletedRows: number; archivedRows: number; deferredRepairCount: number; pending: boolean;
+      feed?: string; remainingSecurityChecks?: number } | null;
   } | null;
   budget?: {
     profile: "free" | "paid";
@@ -72,6 +73,7 @@ export type EodPublicationStatus = {
     deadline_checked_at?: string | null; deadline_missed?: number; deadlineMissingScopes?: string[];
     deadlineAppliesToDelivery?: boolean; error_code?: string | null; error_message?: string | null;
     failedStage?: string | null; providerErrors?: Record<string, string>; github_run_id?: string | null;
+    progress?: { completedSymbols: number | null; completedBatches: number | null; totalBatches: number | null };
     updated_at?: string | null;
     historyTickers?: string[] | null;
     historySessions?: 520 | 1400;

@@ -184,7 +184,8 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
   // Normal coordination uses the same admitted connection as ingestion. The
   // separate control connection is reserved only for terminal failure reporting.
   const runDb=env.OPS_DB;
-  const claim=await runDb.prepare(`UPDATE eod_runs SET status='running',stage='inputs',lease_token=?,lease_until=?,updated_at=?
+  const claim=await runDb.prepare(`UPDATE eod_runs SET status='running',stage='inputs',lease_token=?,lease_until=?,updated_at=?,
+    error_code=NULL,error_message=NULL,next_attempt_at=NULL
     WHERE id=? AND status<>'completed' AND (lease_until IS NULL OR lease_until<=?)`)
     .bind(lease,new Date(Date.now()+10*60_000).toISOString(),now,runId,now).run();
   const run=await runDb.prepare("SELECT * FROM eod_runs WHERE id=?").bind(runId).first<EodRun>();

@@ -4,7 +4,7 @@ import {
   type MarketHistoryBar,
 } from "./market-history";
 import type { Env } from "./types";
-import { EOD_CATALOG_SCOPE, loadEodCatalogRows } from "./eod-catalog-service";
+import { EOD_CATALOG_SCOPE, loadEodCatalogRows, decodeEodCatalogUnavailableTuple } from "./eod-catalog-service";
 import { validateEodCatalogQuarantineState } from "./eod-catalog-quarantine-validation";
 import { eodHash } from "./eod-publication-service";
 import { eodStoragePolicy } from "./eod-storage-policy";
@@ -127,7 +127,24 @@ async function assertPruneCatalog(env: Env, tickers: string[], sessionDate: stri
   const catalogTickers = [...actual] as string[];
   let quarantined = new Set<string>(tickers.filter(ticker => !actual.has(ticker)));
   try {
-    if (rows.some(row => Array.isArray(row) && row.length > 10)) {
+    if (allowPopulationChange) {
+      // Retention can use yesterday's stable selection without certifying its
+      // analytical values. Isolate later corrections and pending repairs;
+      // unchanged securities still require the ordinary catalog validation.
+      const states = await db.prepare(`SELECT CAST(t.value AS TEXT) AS ticker,COALESCE(r.revision,0) AS revision,
+        EXISTS(SELECT 1 FROM eod_adjustment_repairs p WHERE p.ticker=t.value
+          AND p.feed IN ('sip','yahoo-eod') AND p.status='pending') AS pending
+        FROM json_each(?) t LEFT JOIN eod_input_revisions r ON r.feed='sip' AND r.ticker=t.value
+        /* eod-retention-revisions */`).bind(JSON.stringify(catalogTickers))
+        .all<{ticker:string;revision:number;pending:number}>();
+      const byTicker = new Map(states.results.map(row => [row.ticker,row]));
+      if (byTicker.size !== catalogTickers.length) return defer("retention revision selection is incomplete");
+      for (const row of rows) {
+        if (!Array.isArray(row) || ![10,11].includes(row.length) || !Number.isSafeInteger(row[6]) || row[6]<0) return defer("invalid catalog row");
+        const state = byTicker.get(row[0]);
+        if (decodeEodCatalogUnavailableTuple(row) || state?.pending || state?.revision !== row[6]) quarantined.add(row[0]);
+      }
+    } else if (rows.some(row => Array.isArray(row) && row.length > 10)) {
       for (const ticker of (await validateEodCatalogQuarantineState(env, { catalog: payload, tickers: catalogTickers, sessionDate })).keys()) quarantined.add(ticker);
     }
     await loadEodCatalogRows(env, tickers.filter(ticker => !quarantined.has(ticker)), sessionDate);

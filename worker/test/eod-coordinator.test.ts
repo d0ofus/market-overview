@@ -106,6 +106,15 @@ describe("EOD durable coordinator against SQLite", { timeout: 30_000 }, () => {
     expect(posts()).toHaveLength(0);
     expect((await storedRun(old.id))?.status).toBe("queued");
   });
+
+  it("exposes bounded batch progress without returning the internal checkpoint payload",async()=>{
+    const run=await enqueueEodRun(env,"2026-09-08","daily",now);
+    await ops.db.prepare("UPDATE eod_runs SET progress_json=? WHERE id=?")
+      .bind(JSON.stringify({chunk:5,total:254,symbols:125,privatePayload:"not-public"}),run.id).run();
+    const result=(await eodStatus(env,now)).runs[0];
+    expect(result.progress).toEqual({completedSymbols:125,completedBatches:5,totalBatches:254});
+    expect(JSON.stringify(result)).not.toContain("not-public");
+  });
   const activeGithub = (id: string, status = "queued") => ({ id: 42, display_title: `EOD ${id}`,
     status, head_branch: "main", event: "workflow_dispatch" });
   async function publish(scope: string, acceptedAt: string, sessionDate = "2026-09-08", revision = 1) {

@@ -93,10 +93,14 @@ async function main() {
       const checkTickers=["SPY","QQQ","IWM","DIA","AAPL","MSFT","NVDA","BRK.B"].filter(ticker=>inputs.tickers.includes(ticker));
       const calendar=(await market.prepare("SELECT session_date FROM market_calendar_sessions WHERE session_date<=? ORDER BY session_date")
         .bind(copy.identity.sessionDate).all<{session_date:string}>()).results.map(row=>row.session_date);
-      const currentClock=await market.prepare("SELECT revision FROM eod_input_clock WHERE id='default'").first<number>("revision");
+      const readSampleRevisions=async()=>JSON.stringify((await market.prepare(`SELECT CAST(t.value AS TEXT) AS ticker,CAST(f.value AS TEXT) AS feed,
+        COALESCE(r.revision,0) AS revision,p.status,p.updated_at FROM json_each(?) t CROSS JOIN json_each(?) f
+        LEFT JOIN eod_input_revisions r ON r.ticker=t.value AND r.feed=f.value
+        LEFT JOIN eod_adjustment_repairs p ON p.ticker=t.value AND p.feed=f.value ORDER BY ticker,feed`)
+        .bind(JSON.stringify(checkTickers),JSON.stringify(["sip","yahoo-eod"])).all()).results);
+      const currentSample=await readSampleRevisions();
       const assertCapture=async()=>{
-        const current=await market.prepare("SELECT revision FROM eod_input_clock WHERE id='default'").first<number>("revision");
-        if (current!==currentClock) throw new Error("eod-release-inputs-changed-during-validation");
+        if (await readSampleRevisions()!==currentSample) throw new Error("eod-release-inputs-changed-during-validation");
       };
       // Original full-copy parity remains dated in sourceEvidence. Subsequent
       // tracked provider corrections legitimately differ from that snapshot.

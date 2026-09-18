@@ -67,6 +67,25 @@ describe("history archive and retention against real SQLite", { timeout: 20_000 
     expect(await market.db.prepare("SELECT COUNT(*) as count FROM eod_history_relocations").first()).toEqual({ count: 0 });
   });
 
+  it.each(["pending", "corrected"])("defers a %s security without blocking independent scheduled retention", async (change) => {
+    await market.db.prepare(`INSERT INTO alpaca_daily_bars(feed,ticker,date,o,h,l,c,volume,fetched_at,
+      source_provider,adjustment,observed_at,reported_volume,reported_volume_collected_at)
+      SELECT feed,'BBB',date,o,h,l,c,volume,fetched_at,source_provider,adjustment,observed_at,reported_volume,reported_volume_collected_at
+      FROM alpaca_daily_bars WHERE ticker='AAA'`).run();
+    const payload = encodeEodCatalogPayload(rows.at(-1)!.date, [buildEodCatalogRow("AAA",rows,300),
+      buildEodCatalogRow("BBB",rows.map(row=>({...row,ticker:"BBB"})),300)]);
+    await market.db.prepare("UPDATE eod_publications SET payload_json=?,payload_checksum=? WHERE scope='history:catalog'")
+      .bind(JSON.stringify(payload),await eodHash(payload)).run();
+    if (change === "pending") await market.db.prepare(`INSERT INTO eod_adjustment_repairs(feed,ticker,status,start_date,updated_at)
+      VALUES('sip','BBB','pending',?,?)`).bind(rows[0].date,now.toISOString()).run();
+    else await market.db.prepare("UPDATE alpaca_daily_bars SET c=c+0.01 WHERE ticker='BBB' AND date=?").bind(rows[0].date).run();
+    const result = await archiveAndPruneMarketHistory(env,{tickers:["AAA","BBB"],endDate:rows.at(-1)!.date,
+      catalogSessionDate:rows.at(-1)!.date,...evidence});
+    expect(result).toMatchObject({archivedRows:40,deletedRows:40,deferredRepairs:["BBB"]});
+    expect(await market.db.prepare("SELECT COUNT(*) AS count FROM alpaca_daily_bars WHERE ticker='BBB'").first()).toEqual({count:300});
+    expect(await loadMarketHistory(env,{tickers:["AAA"]})).toEqual(rows);
+  });
+
   it("relocates Yahoo fallback history to 90 hot rows without changing provenance or correction clocks", async () => {
     await market.db.prepare(`INSERT INTO alpaca_daily_bars(feed,ticker,date,o,h,l,c,volume,reported_volume,source_provider,adjustment,observed_at,fetched_at)
       SELECT 'yahoo-eod',ticker,date,o,h,l,c,volume,NULL,'yahoo','split',observed_at,fetched_at FROM alpaca_daily_bars

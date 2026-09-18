@@ -468,7 +468,9 @@ export async function eodStatus(env: Env, now = new Date()) {
         .slice(0,50).map(([ticker,message]) => [ticker,message.slice(0,300)])) : {};
     let missing: unknown;
     try { missing=JSON.parse(deadline_missing_scopes_json ?? "[]"); } catch { missing=[]; }
+    const progressCount=(key:string) => typeof progress[key]==="number" && Number.isSafeInteger(progress[key]) && progress[key]>=0 ? progress[key] as number : null;
     return {...run,...eodRunHistorySelection({history_tickers_json,history_sessions}),
+      progress:{completedSymbols:progressCount("symbols"),completedBatches:progressCount("chunk"),totalBatches:progressCount("total")},
       failedStage:run.error_code ? run.stage : null,providerErrors:errors,
       deadlineMissingScopes:Array.isArray(missing) ? missing.filter((scope):scope is string => typeof scope==="string") : [],
       deadlineAppliesToDelivery:run.purpose==="daily" && run.mode==="active"};

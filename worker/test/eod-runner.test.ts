@@ -727,6 +727,18 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
     expect(calls.yahoo).not.toHaveBeenCalled();
   });
 
+  it("clears a previous failure and retry timestamp while the new attempt is running",async () => {
+    await ops.db.prepare("UPDATE eod_runs SET status='retrying',error_code='resource-budget',error_message='old attempt',next_attempt_at='2026-01-01' WHERE id=?")
+      .bind(runId).run();
+    const normal=calls.alpaca.getMockImplementation()!;
+    calls.alpaca.mockImplementationOnce(async (...args:unknown[])=>{
+      expect(await ops.db.prepare("SELECT status,error_code,error_message,next_attempt_at FROM eod_runs WHERE id=?").bind(runId).first())
+        .toEqual({status:"running",error_code:null,error_message:null,next_attempt_at:null});
+      return normal(...args);
+    });
+    expect((await runEodBatch(env,runId)).status).toBe("completed");
+  });
+
   it("leaves a completed durable run unchanged without provider work",async () => {
     await ops.db.prepare("UPDATE eod_runs SET status='completed',stage='finished',completed_at=? WHERE id=?")
       .bind(`${session}T21:00:00Z`,runId).run();

@@ -102,12 +102,14 @@ export async function dailyOperationStatus(env: Env, now = new Date()) {
   if (!release) return null;
   const storage = await dailyStorageStatus(env, now);
   const state = await readDailyEvidence<{ sessionDate: string; updatedAt: string; completedAt: string | null;
-    startedAt: string; deletedRows: number; archivedRows: number; deferredRepairs: string[]; cursor: unknown }>(env.OPS_DB!, "history-retention:state");
+    startedAt: string; deletedRows: number; archivedRows: number; deferredRepairs: string[];
+    tickers: string[]; feed: string; cursor: {tickerIndex:number} | null }>(env.OPS_DB!, "history-retention:state");
   return { codeRevision: release.codeRevision, approvedAt: release.approvedAt, hotSessions: release.hotSessions,
     storage: { status: storage.status, checkedAt: storage.checkedAt ?? null, accountBytes: storage.accountBytes ?? null,
       marketBytes: storage.databases?.find(row=>row.id===release.bindings.market)?.bytes ?? null,
       historyBytes: storage.databases?.find(row=>row.id===release.bindings.history)?.bytes ?? null, limits: storage.limits },
     maintenance: state ? { sessionDate: state.sessionDate, updatedAt: state.updatedAt, completedAt: state.completedAt,
       startedAt: state.startedAt, deletedRows: state.deletedRows, archivedRows: state.archivedRows,
+      feed: state.feed, remainingSecurityChecks: state.completedAt ? 0 : Math.max(0,state.tickers.length-(state.cursor?.tickerIndex ?? 0)),
       deferredRepairCount: state.deferredRepairs.length, pending: !state.completedAt } : null };
 }
