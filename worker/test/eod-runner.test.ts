@@ -405,7 +405,7 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
       .toEqual({count:260});
   });
 
-  it("reads archived history but keeps the healthy five-session overlap entirely in the 90-session hot store",async()=>{
+  it("recovers four missing recent sessions in the hot store without rewriting archived years",async()=>{
     const history=createSqliteD1();
     try {
       history.migrate("history-migrations");
@@ -415,7 +415,7 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
       frozen.tickers=["SPY"];
       await ops.db.prepare("UPDATE eod_runs SET input_json=? WHERE id=?").bind(JSON.stringify(frozen),runId).run();
       await archiveMarketHistoryBars(archivedEnv,dates.slice(-260,-90).map(date=>makeBar(date)));
-      await market.db.prepare("DELETE FROM alpaca_daily_bars WHERE date<? OR date=?").bind(dates.at(-90),session).run();
+      await market.db.prepare("DELETE FROM alpaca_daily_bars WHERE date<? OR date>=?").bind(dates.at(-90),dates.at(-4)).run();
       const before=await history.db.prepare("SELECT * FROM market_history_blocks ORDER BY id").all();
       expect((await runEodBatch(archivedEnv,runId,ops.db,{hotSessions:90})).status).toBe("completed");
       expect(calls.alpaca.mock.calls).toEqual([
@@ -684,7 +684,7 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
     } finally {config.mockRestore();vi.mocked(loadEodMemberships).mockReset();}
   });
 
-  it("keeps a private90-session storage target small while calculating from the full260-session archive window",async () => {
+  it("fills the normal90-session recent window while calculating from the full260-session archive window",async () => {
     const history=createSqliteD1();
     try {
       history.migrate("history-migrations");
@@ -692,9 +692,7 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
       await market.db.prepare("DELETE FROM alpaca_daily_bars WHERE date<>?").bind(session).run();
       expect((await runEodBatch(archivedEnv,runId,ops.db,{hotSessions:90})).status).toBe("completed");
       const hot=await market.db.prepare("SELECT COUNT(*) AS count,MIN(date) AS firstDate FROM alpaca_daily_bars WHERE feed='sip' AND ticker='SPY'").first<{count:number;firstDate:string}>();
-      // A cold bootstrap seeds one hot close per security. Its previous four
-      // reconciliation bars are already available through the archive reader.
-      expect(hot!.count).toBe(1);
+      expect(hot!.count).toBe(90);
       expect(hot!.firstDate>=dates.at(-90)!).toBe(true);
       expect(await loadMarketHistory(archivedEnv,{tickers:["SPY"],feed:"sip"})).toHaveLength(260);
       const catalog=await market.db.prepare("SELECT payload_json FROM eod_publications WHERE scope='history:catalog'").first<string>("payload_json");

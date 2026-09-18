@@ -13,6 +13,8 @@ GitHub Actions owns daily prices, calculations and retention. Cloudflare's five-
 
 The recent-price window is 90 sessions. The shared reader combines it with retained lossless archive blocks. Every relocation verifies its archive write and checksum before exact conditional deletion; failed repairs are isolated. Accepted publications and archived price history are retained.
 
+Normal recovery inserts missing recent sessions directly into the hot table. Only genuinely older inputs go through archive promotion during ingestion. The compact one-close bootstrap path remains confined to private storage migrations.
+
 `paid-daily-v2` uses a 2 GB per-database operating ceiling, a 3.5 GB account warning and a 4.5 GB stop for optional growth. All account databases, including the original frozen source, count. Usage admission retains 20 billion reads / 35 million writes over 31 days. These are application limits, not a guarantee against charges from unrelated account activity. A Free downgrade requires separate size/usage verification.
 
 ## Release and production record
@@ -24,6 +26,8 @@ Run `check` for bounded live validation. After tests and a clean main commit, `p
 `activate` verifies deployed Worker bindings and GitHub variables before completing the migration and enqueueing the latest eligible session. `record` requires current health and a completed real retention cycle before saving `recovery:production-configuration` and `daily-release-production:<commit>`.
 
 The GitHub runner remains pinned to the approved backend commit. UI-only main commits can deploy independently. Backend, schema or reader changes require validating and preparing their new release identity before updating the runner pin.
+
+The Vercel project build-skip command must exit 1 when Git history is unavailable (`git diff --quiet ... 2>/dev/null || exit 1`). `.vercelignore` excludes Git metadata, so a raw Git error must not fail the deployment before the web build starts.
 
 ## What to inspect
 

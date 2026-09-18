@@ -506,12 +506,12 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
             updated[i]=stored;
           } else changedBars.push(bar);
         }
-        // Cold bootstrap stores only the target close hot. Missing earlier
-        // sessions go directly to verified blocks, including the rest of the
-        // five-session reconciliation overlap. Existing hot corrections still
-        // update in place. This avoids five days of indexed insert/trigger cost
-        // before even one full-universe daily publication can finish.
-        const archiveOnly=env.MARKET_HISTORY_DB ? changedBars.filter((bar) => bar.date<hotStart || (bar.date<run.session_date && !existingKeys.has(`${bar.ticker}:${bar.date}`))) : [];
+        // Normal delivery fills missing recent sessions in bounded hot-table
+        // batches. Routing these through per-security archive promotion turns
+        // a short delivery gap into thousands of unnecessary REST round trips.
+        // Keep the old compact bootstrap behavior only for a private migration.
+        const archiveOnly=env.MARKET_HISTORY_DB ? changedBars.filter((bar) => bar.date<hotStart
+          || (options.storageInputs && bar.date<run.session_date && !existingKeys.has(`${bar.ticker}:${bar.date}`))) : [];
         checkContinuation();
         if (archiveOnly.length) {
           const archived=await archiveMarketHistoryBars(env,archiveOnly);

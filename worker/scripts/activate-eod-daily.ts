@@ -176,7 +176,9 @@ async function main() {
           WHERE id=? AND target_database_id=? AND status IN ('awaiting-evidence','awaiting-cutover') AND (lease_until IS NULL OR lease_until<=?)`)
           .bind(now,now,revision,migrationId,bindings.market,now),
         ops.prepare(`INSERT INTO eod_rollout_evidence(id,evidence_json,updated_at) VALUES('monitoring:public-activation',?,?)
-          ON CONFLICT(id) DO NOTHING`).bind(JSON.stringify({version:1,activatedAt:now,codeRevision:revision,marketDatabaseId:bindings.market}),now),
+          ON CONFLICT(id) DO UPDATE SET evidence_json=json_set(eod_rollout_evidence.evidence_json,'$.codeRevision',?),updated_at=excluded.updated_at
+          WHERE json_extract(eod_rollout_evidence.evidence_json,'$.marketDatabaseId')=?`)
+          .bind(JSON.stringify({version:1,activatedAt:now,codeRevision:revision,marketDatabaseId:bindings.market}),now,revision,bindings.market),
       ]);
       if ((await loadStorageMigration(ops,migrationId))?.status!=="completed") throw new Error("eod-release-migration-activation-failed");
       const session=await expectedEodSession(env);
