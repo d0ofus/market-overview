@@ -5,6 +5,7 @@ GitHub Actions owns daily prices, calculations and retention. Cloudflare's five-
 ## Schedule and recovery
 
 - Actual New York exchange close +20 minutes starts the daily job. +50/+95 minutes resume failed work when no live runner owns it. +120 minutes records delivery outcome.
+- Each five-minute heartbeat refreshes the bounded current-health report. The independent daily monitor finalizes historical usage; a daily report alone cannot keep a five-minute health check current.
 - The next trading morning reconciles current prices and corrections. Retention starts at 07:00 New York time when no daily/reconciliation job is due, and resumes a saved selection after interruption.
 - GitHub retains its 80-minute job ceiling. Retention checkpoints at most 500 bars and yields after 70 minutes. It never fetches provider history. Broad historical expansion is manual and outside daily delivery.
 - Alpaca SIP is primary; Yahoo's bounded fallback serves missing current prices/adjacent-session returns. A missing long metric stays null and does not consume all fallback capacity or invalidate an otherwise complete daily checkpoint.

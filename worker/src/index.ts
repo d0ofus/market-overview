@@ -1,4 +1,5 @@
 import { refreshEodAccountUsageHeartbeat } from "./eod-account-usage-heartbeat";
+import { collectEodRolloutMonitoring } from "./eod-rollout-monitor";
 import { Hono } from "hono";
 import { coordinateEod, dispatchEodRun, enqueueEodRun, eodEnabled, eodStatus, expectedEodSession, registerEodRoutes, requestEodRefresh, type EodRun } from "./eod-coordinator";
 import { EOD_RUNTIME_COORDINATOR_PATH, isEodRuntimeHttpProbe, runEodRuntimeProbe } from "./eod-runtime-telemetry";
@@ -7908,6 +7909,9 @@ export default {
       const { runBudgeted, auditSkipped, budget } = runner;
       if (eodEnabled(env) || env.EOD_STORAGE_MIGRATION_ID) {
         await runBudgeted("eod-coordinate", 4, () => coordinateEod(env,now));
+        // Health expires after five minutes. Refresh bounded control evidence
+        // on this heartbeat, independently of provider work and daily reports.
+        await runBudgeted("eod-health", 4, () => collectEodRolloutMonitoring(env).then(() => undefined));
         await runBudgeted("eod-commentary",6,() => maybeRunPublishedEodCommentary(env,now).then(() => undefined));
       }
       if (env.EOD_RUNNER_MODE === "active") {

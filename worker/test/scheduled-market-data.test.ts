@@ -15,6 +15,24 @@ const scheduledMocks = vi.hoisted(() => ({
   reconcileOverview: vi.fn(),
   loadRecovery: vi.fn(),
   auditFreshness: vi.fn(async () => undefined),
+  eodCoordinate: vi.fn(async () => undefined),
+  eodHealth: vi.fn(async () => undefined),
+  eodCommentary: vi.fn(async () => undefined),
+}));
+
+vi.mock("../src/eod-coordinator", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../src/eod-coordinator")>(),
+  coordinateEod: scheduledMocks.eodCoordinate,
+}));
+
+vi.mock("../src/eod-rollout-monitor", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../src/eod-rollout-monitor")>(),
+  collectEodRolloutMonitoring: scheduledMocks.eodHealth,
+}));
+
+vi.mock("../src/market-commentary-service", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../src/market-commentary-service")>(),
+  maybeRunPublishedEodCommentary: scheduledMocks.eodCommentary,
 }));
 
 const workerSchedule: WorkerScheduleSettings = {
@@ -131,6 +149,21 @@ describe("scheduled market-data lane", () => {
     } as const;
     scheduledMocks.reconcileOverview.mockResolvedValue(recovery);
     scheduledMocks.loadRecovery.mockResolvedValue(recovery);
+  });
+
+  it.each([false, true])("refreshes EOD health outside the canary gate and isolates monitoring failure (%s)", async (failHealth) => {
+    if (failHealth) scheduledMocks.eodHealth.mockRejectedValueOnce(new Error("monitor unavailable"));
+    await runMarketDataLane(scheduledEnv({
+      EOD_RUNNER_MODE: "active", MARKET_PIPELINE_MODE: "canary",
+      SCHEDULED_MARKET_DATA_BUDGET: "70", SCHEDULED_SUBREQUEST_RESERVE: "10",
+    }));
+    expect(scheduledMocks.eodCoordinate).toHaveBeenCalledOnce();
+    expect(scheduledMocks.eodHealth).toHaveBeenCalledOnce();
+    expect(scheduledMocks.eodCommentary).toHaveBeenCalledOnce();
+    expect(scheduledMocks.symbolCatalog).toHaveBeenCalledOnce();
+    expect(scheduledMocks.postClose).not.toHaveBeenCalled();
+    expect(scheduledMocks.overviewCurrent).not.toHaveBeenCalled();
+    expect(scheduledMocks.eodCoordinate.mock.invocationCallOrder[0]).toBeLessThan(scheduledMocks.eodHealth.mock.invocationCallOrder[0]!);
   });
 
   it("reserves a constrained lane budget for actionable post-close bars", async () => {
