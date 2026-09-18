@@ -10,6 +10,8 @@
   "include": [
     "src",
     "scripts/eod-runner.ts",
+    "scripts/activate-eod-daily.ts",
+    "scripts/qualify-eod-retention.ts",
     "scripts/register-eod-listing-evidence.ts",
     "scripts/eod-monitor-runner.ts",
     "scripts/market-storage-runner.ts",

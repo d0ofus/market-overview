@@ -1,0 +1,33 @@
+name: EOD retention qualification
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: market-eod-writer
+  cancel-in-progress: false
+jobs:
+  qualify:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 80
+    environment: market-eod
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Qualify archive capacity using retained prices
+        run: npx tsx worker/scripts/qualify-eod-retention.ts
+        env:
+          EOD_RETENTION_QUALIFICATION: 'true'
+          EOD_PRODUCTION_CODE_REVISION: ${{ vars.EOD_PRODUCTION_CODE_REVISION }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          EOD_CORE_DATABASE_ID: ${{ vars.EOD_CORE_DATABASE_ID }}
+          EOD_MARKET_DATABASE_ID: ${{ vars.EOD_MARKET_DATABASE_ID }}
+          EOD_HISTORY_DATABASE_ID: ${{ vars.EOD_HISTORY_DATABASE_ID }}
+          EOD_OPS_DATABASE_ID: ${{ vars.EOD_OPS_DATABASE_ID }}
+          CLOUDFLARE_EOD_D1_TOKEN: ${{ secrets.CLOUDFLARE_EOD_D1_TOKEN }}
+          CLOUDFLARE_EOD_ANALYTICS_TOKEN: ${{ secrets.CLOUDFLARE_EOD_ANALYTICS_TOKEN }}

@@ -28,6 +28,8 @@ Run `check` for bounded live validation. After tests and a clean main commit, `p
 
 The GitHub runner remains pinned to the approved backend commit. UI-only main commits can deploy independently. Backend, schema or reader changes require validating and preparing their new release identity before updating the runner pin.
 
+The manual `EOD retention qualification` workflow measures the archive phase across the full active catalog using one existing SIP close per available security. It retains the hot copies, checks archive read-back and unchanged input revisions, and uses the normal writer concurrency group and Paid admission ledger. It makes no provider requests. Its result combines measured archive time, the measured real retention cycle and a five-minute deletion margin against the 80-minute ceiling. This is a bounded performance qualification, not a claim that thousands of hot rows were deleted when only a smaller real backlog existed. Results and resumable checkpoints are stored in Ops under `retention-qualification:<production-commit>:<session>`; the operator-tool commit is recorded separately from the deployed application commit.
+
 The Vercel project build-skip command must exit 1 when Git history is unavailable (`git diff --quiet ... 2>/dev/null || exit 1`). `.vercelignore` excludes Git metadata, so a raw Git error must not fail the deployment before the web build starts.
 
 ## What to inspect
