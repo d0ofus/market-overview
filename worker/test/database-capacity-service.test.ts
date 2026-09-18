@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { loadDatabaseCapacity, sampleDatabaseCapacity } from "../src/database-capacity-service";
 import worker from "../src/index";
 import type { Env } from "../src/types";
+import { assertMarketDataCapacity } from "../src/market-data-db";
 
 function fakeDb(sizeAfter: number | Error, inserts: unknown[][] = []): D1Database {
   return {
@@ -30,6 +31,23 @@ function fakeDb(sizeAfter: number | Error, inserts: unknown[][] = []): D1Databas
 }
 
 describe("database capacity health", () => {
+  it.each([
+    { size: 500_000_000, level: "ok" },
+    { size: 1_750_000_000, level: "warning" },
+    { size: 1_900_000_000, level: "critical" },
+    { size: 2_000_000_000, level: "halt" },
+  ])("applies the Paid policy consistently to recent prices, archive health and native writers at $size", async ({ size, level }) => {
+    const env = { DB: fakeDb(20_000_000), MARKET_DATA_DB: fakeDb(size), MARKET_HISTORY_DB: fakeDb(size),
+      OPS_DB: fakeDb(10_000_000), EOD_BUDGET_PROFILE: "paid",
+      MARKET_DATA_WARN_BYTES: "350000000", MARKET_DATA_HALT_BYTES: "425000000" } as Env;
+    const statuses = await loadDatabaseCapacity(env);
+    for (const database of ["market", "history"]) {
+      expect(statuses.find(row => row.database === database)).toMatchObject({ level, haltBytes: 2_000_000_000 });
+    }
+    if (level === "halt") await expect(assertMarketDataCapacity(env)).rejects.toThrow("capacity halt");
+    else await expect(assertMarketDataCapacity(env)).resolves.toBeUndefined();
+  });
+
   it.each([
     { size: 30_000_000, level: "ok", status: 200 },
     { size: 351_000_000, level: "warning", status: 200 },

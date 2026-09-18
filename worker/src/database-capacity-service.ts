@@ -1,5 +1,6 @@
 import { getMarketDataDb } from "./market-data-db";
 import { getOpsDb } from "./ops-db";
+import { eodStoragePolicy } from "./eod-storage-policy";
 import type { Env } from "./types";
 
 export type DatabaseCapacityLevel = "ok" | "warning" | "critical" | "halt" | "unavailable";
@@ -25,6 +26,10 @@ function thresholds(env: Env, database: DatabaseCapacityStatus["database"]): {
   critical: number | null;
   halt: number | null;
 } {
+  const policy = eodStoragePolicy(env.EOD_BUDGET_PROFILE);
+  if ((database === "market" || database === "history") && policy.version === "paid-daily-v2") {
+    return { warn: policy.databaseWarningBytes, critical: policy.databaseCriticalBytes, halt: policy.databaseStopBytes };
+  }
   if (database === "core") {
     return {
       warn: positiveInteger(env.CORE_DB_WARN_BYTES, 350_000_000),

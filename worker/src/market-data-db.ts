@@ -2,6 +2,7 @@ import { assertEodRollingBudget, resolveEodBudgetProfile } from "./eod-budget-pr
 import type { Env } from "./types";
 import { loadMarketHistory } from "./market-history";
 import { getOpsDb } from "./ops-db";
+import { eodStoragePolicy } from "./eod-storage-policy";
 
 // About 315 US sessions, preserving the 252-session feature horizon with
 // substantial holiday/listing headroom while staying within D1 Free capacity.
@@ -244,8 +245,9 @@ export async function recordMarketDataD1Usage(
 export function inspectMarketDataSize(env: Env, sizeAfter: number | undefined): void {
   if (!Number.isFinite(sizeAfter)) return;
   const size = Number(sizeAfter);
-  const warnBytes = positiveInteger(env.MARKET_DATA_WARN_BYTES, DEFAULT_WARN_BYTES);
-  const haltBytes = positiveInteger(env.MARKET_DATA_HALT_BYTES, DEFAULT_HALT_BYTES);
+  const policy = eodStoragePolicy(env.EOD_BUDGET_PROFILE);
+  const warnBytes = policy.version === "paid-daily-v2" ? policy.databaseWarningBytes : positiveInteger(env.MARKET_DATA_WARN_BYTES, DEFAULT_WARN_BYTES);
+  const haltBytes = policy.version === "paid-daily-v2" ? policy.databaseStopBytes : positiveInteger(env.MARKET_DATA_HALT_BYTES, DEFAULT_HALT_BYTES);
   if (warnBytes > 0 && size >= warnBytes) {
     console.warn("market-data D1 capacity warning", { sizeAfter: size, warnBytes, haltBytes });
   }
@@ -255,7 +257,8 @@ export async function assertMarketDataCapacity(env: Env): Promise<void> {
   const result = await getMarketDataDb(env).prepare("SELECT 1 as ok").all<{ ok: number }>();
   const size = Number(result.meta?.size_after);
   inspectMarketDataSize(env, size);
-  const haltBytes = positiveInteger(env.MARKET_DATA_HALT_BYTES, DEFAULT_HALT_BYTES);
+  const policy = eodStoragePolicy(env.EOD_BUDGET_PROFILE);
+  const haltBytes = policy.version === "paid-daily-v2" ? policy.databaseStopBytes : positiveInteger(env.MARKET_DATA_HALT_BYTES, DEFAULT_HALT_BYTES);
   if (Number.isFinite(size) && haltBytes > 0 && size >= haltBytes) {
     throw new Error(`Market-data D1 capacity halt reached (${size} bytes >= ${haltBytes} bytes).`);
   }
