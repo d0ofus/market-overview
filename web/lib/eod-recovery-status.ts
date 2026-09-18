@@ -64,9 +64,17 @@ export function buildEodRecoveryView(input: {
   const fresh = (value: string | null | undefined) => dateValid(value) && Date.parse(value) <= now + 60_000 && Date.parse(value) >= now - 300_000;
   const monitorCurrent = Boolean(publicCurrent && currentPolicy && !monitoring?.stale && fresh(monitoring?.checkedAt));
   const health = monitoring?.currentHealth, quota = health?.quota;
+  const limits = publications?.budget?.limits ?? {
+    eodDaily: { reads: 2_500_000, writes: 50_000 }, accountDaily: { reads: 4_500_000, writes: 90_000 }, rolling31: null,
+  };
+  const rolling = publications?.budget?.rolling31;
+  const rollingValid = !limits.rolling31 || Boolean(rolling && fresh(rolling.sampledAt)
+    && rolling.rowsRead + rolling.reservedReads <= limits.rolling31.reads
+    && rolling.rowsWritten + rolling.reservedWrites <= limits.rolling31.writes);
   const quotaValid = Boolean(quota && Object.values(quota).every((value) => Number.isSafeInteger(value) && value >= 0)
-    && quota.eodRowsRead + quota.reservedReads <= 2_500_000 && quota.eodRowsWritten + quota.reservedWrites <= 50_000
-    && quota.accountRowsRead + quota.reservedReads <= 4_500_000 && quota.accountRowsWritten + quota.reservedWrites <= 90_000
+    && quota.eodRowsRead + quota.reservedReads <= limits.eodDaily.reads && quota.eodRowsWritten + quota.reservedWrites <= limits.eodDaily.writes
+    && quota.accountRowsRead + quota.reservedReads <= limits.accountDaily.reads && quota.accountRowsWritten + quota.reservedWrites <= limits.accountDaily.writes
+    && rollingValid
     && quota.eodRowsRead <= quota.accountRowsRead && quota.eodRowsWritten <= quota.accountRowsWritten);
   const monitored = Boolean(monitorCurrent && monitoring?.eligibleForRetirement && monitoring.reasons.length === 0
     && health?.status === "passed" && health.reasons.length === 0 && health.expectedSession && calendarDate(health.expectedSession)
@@ -105,7 +113,7 @@ export function buildEodRecoveryView(input: {
     { label: "Configuration recorded", status: configured ? "complete" : configurationMismatch ? "blocked" : outdatedRecovery ? "outdated" : "pending",
       detail: configured ? `Recorded production revision ${configuration!.codeRevision!.slice(0, 7)}.` : "A separate production configuration check is required after cutover." },
   ];
-  const computerNeeded = configured ? "no" : capacityPause ? "when recovery resumes" : responseCurrent && controllerCurrent ? "yes" : "unknown";
+  const computerNeeded = configured || (publicCurrent && publications?.dailyOperation) ? "no" : capacityPause ? "when recovery resumes" : responseCurrent && controllerCurrent ? "yes" : "unknown";
   return { status, blocker, stage: controller ? recoveryStageLabel(controller.stage) : "Awaiting a recovery report",
     nextRetry: dateValid(controller?.nextAttemptAt) ? controller.nextAttemptAt : null,
     lastReportAt: controller?.updatedAt ?? null, lastCheckedAt: recovery?.checkedAt ?? null,

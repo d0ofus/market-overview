@@ -8,6 +8,7 @@ import type { Env } from "./types";
 import { EOD_YAHOO_ARCHIVE_LAYOUT, storageFallbackModelValid } from "./eod-storage-layout";
 import { resolveStorageExecutionIdentity } from "./market-storage-execution";
 import type { EodCutoverEvidence } from "./eod-rollout-service";
+import { loadDailyRelease } from "./eod-daily-release";
 
 type AcceptedCapacity = Awaited<ReturnType<typeof validateStorageCapacityAnalysis>>;
 const FEEDS = ["sip", "yahoo-eod"] as const;
@@ -213,6 +214,8 @@ export async function initializeStorageHistoryConfigurationStatus(env: Env, now 
  * expiration blocks pruning/acceptance, not a return to the larger legacy window. */
 export async function loadApprovedStorageHotSessions(env: Env): Promise<260 | 90 | null> {
   if (!env.EOD_CODE_REVISION) return null;
+  const release = await loadDailyRelease(env);
+  if (release) return release.hotSessions;
   return (await loadApproval(env, env.EOD_CODE_REVISION))?.proof.model.hotSessions ?? null;
 }
 

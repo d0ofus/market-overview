@@ -1,4 +1,5 @@
 import { pacedEodRestFetch } from "./eod-rest-request-limiter";
+import { eodStoragePolicy } from "./eod-storage-policy";
 import { assertEodRollingBudget, eodBudgetWindow, resolveEodBudgetProfile, type EodBudgetProfile } from "./eod-budget-profile";
 
 /** Node-side D1 bridge. Only repository SQL reaches this adapter; it is never an HTTP SQL endpoint. */
@@ -330,7 +331,20 @@ export function estimateEodQueries(queries: readonly EodSql[]): { reads: number;
     if (query.sql.trimEnd().endsWith("/* eod-history-catalog-read */")) {
       // The compact catalog's JSON array is traversed even for a small request;
       // include the bounded full population and revision/repair lookup work.
-      reads += 50_000;
+      reads += 150_000;
+      continue;
+    }
+    if (query.sql.trimEnd().endsWith("/* eod-retention-cutoffs */")) {
+      const tickers: unknown = JSON.parse(String(query.params[4]));
+      const offset = Number(query.params[2]);
+      if (!Array.isArray(tickers) || tickers.length > 100 || ![89,259].includes(offset)) throw new Error("eod-retention-selection-invalid");
+      reads += tickers.length * (offset + 10) * 2 + 64;
+      continue;
+    }
+    if (query.sql.trimEnd().endsWith("/* eod-retention-candidates */")) {
+      const limit = Number(query.params[4]);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error("eod-retention-selection-invalid");
+      reads += limit * 2 + 16;
       continue;
     }
     if (/\/\* eod-history-relocation-(register|delete|cleanup) \*\/$/.test(query.sql.trimEnd())) {
@@ -555,7 +569,7 @@ export function createEodAdmission(ops: D1Database, runId: string, options: {
           stopped = new Error(`eod-d1-query-budget-estimate-exceeded; reads=${reads}/${token.reads}; writes=${writes}/${token.writes}; statements=${queries.length}; classes=${classes}`);
         }
       }
-      if (usage && usage.sizeAfter >= 400_000_000) stopped = new Error("eod-d1-capacity-critical");
+      if (usage && usage.sizeAfter >= eodStoragePolicy(profile.name).databaseStopBytes) stopped = new Error("eod-d1-capacity-critical");
       if (stopped || envelope.date !== clock().toISOString().slice(0, 10)) envelope.draining = true;
       if (envelope.draining) await close(envelope);
       if (stopped) throw stopped;

@@ -7,13 +7,14 @@ import type { Env } from "./types";
 import { EOD_CATALOG_SCOPE, loadEodCatalogRows } from "./eod-catalog-service";
 import { validateEodCatalogQuarantineState } from "./eod-catalog-quarantine-validation";
 import { eodHash } from "./eod-publication-service";
+import { eodStoragePolicy } from "./eod-storage-policy";
+import { retentionDatabase } from "./eod-retention-database";
 
 export const MARKET_HISTORY_READER_CONTRACT_VERSION = 1;
 export const MARKET_HISTORY_REQUIRED_CONSUMERS = [
   "overview", "breadth", "correlation-5y", "patterns-520", "watchlist", "relative-strength",
   "scans", "ticker-max", "earnings-gaps", "coverage-and-repair",
 ] as const;
-const CAPACITY_TARGET_BYTES = 350_000_000;
 const MAX_MAINTENANCE_ROWS = 500;
 
 export type HistoryCapacityEvidence = {
@@ -48,9 +49,10 @@ export type HistoryReaderEvidence = {
 };
 
 /** This projects occupied storage, not immediate SQLite file shrinkage after DELETE. */
-export function projectHistoryCapacity(input: HistoryCapacityEvidence): {
+export function projectHistoryCapacity(input: HistoryCapacityEvidence, profile?: string): {
   marketBytes: number; archiveBytes: number; underTarget: boolean;
 } {
+  const target = eodStoragePolicy(profile).databaseTargetBytes;
   if (input.liveProjection) {
     const projection = input.liveProjection;
     const values = [input.marketDatabaseBytes, input.archiveDatabaseBytes, projection.marketBytes,
@@ -61,7 +63,7 @@ export function projectHistoryCapacity(input: HistoryCapacityEvidence): {
       throw new Error("Live physical storage evidence is incomplete.");
     }
     return { marketBytes: projection.marketBytes, archiveBytes: projection.archiveBytes,
-      underTarget: projection.marketBytes < CAPACITY_TARGET_BYTES && projection.archiveBytes < CAPACITY_TARGET_BYTES };
+      underTarget: projection.marketBytes < target && projection.archiveBytes < target };
   }
   const values = [input.marketDatabaseBytes, input.priceTableAndIndexBytes, input.priceRows,
     input.retainedPriceRows, input.archiveDatabaseBytes, input.additionalArchiveBytes];
@@ -71,11 +73,11 @@ export function projectHistoryCapacity(input: HistoryCapacityEvidence): {
   const marketBytes = Math.ceil(input.marketDatabaseBytes - input.priceTableAndIndexBytes
     + input.priceTableAndIndexBytes * input.retainedPriceRows / input.priceRows);
   const archiveBytes = Math.ceil(input.archiveDatabaseBytes + input.additionalArchiveBytes);
-  return { marketBytes, archiveBytes, underTarget: marketBytes < CAPACITY_TARGET_BYTES && archiveBytes < CAPACITY_TARGET_BYTES };
+  return { marketBytes, archiveBytes, underTarget: marketBytes < target && archiveBytes < target };
 }
 
 export function assertHistoryPruneEvidence(
-  capacity: HistoryCapacityEvidence, readers: HistoryReaderEvidence, now = new Date(), codeRevision?: string,
+  capacity: HistoryCapacityEvidence, readers: HistoryReaderEvidence, now = new Date(), codeRevision?: string, profile?: string,
 ): void {
   const age = (value: string) => now.getTime() - Date.parse(value);
   if (!Number.isFinite(age(capacity.measuredAt)) || age(capacity.measuredAt) < 0 || age(capacity.measuredAt) > 86_400_000) {
@@ -88,7 +90,7 @@ export function assertHistoryPruneEvidence(
     || MARKET_HISTORY_REQUIRED_CONSUMERS.some((consumer) => !readers.consumers.includes(consumer))) {
     throw new Error("Every historical consumer must pass current archive parity before hot pruning.");
   }
-  if (!projectHistoryCapacity(capacity).underTarget) throw new Error("Projected market and history storage must each remain below 350 MB.");
+  if (!projectHistoryCapacity(capacity, profile).underTarget) throw new Error(`Projected market and history storage must each remain below ${eodStoragePolicy(profile).databaseTargetBytes / 1_000_000} MB.`);
 }
 
 type MaintenanceEnv = Env & { EOD_ARCHIVE_PRUNE_ENABLED?: string };
@@ -99,8 +101,8 @@ const pruneCatalogApprovals = new WeakMap<D1Database, { key: string; head: Prune
 /** Reusable only while both the immutable catalog and correction clock match.
  * Relocating verified identical rows is revision-neutral; genuine repairs defer
  * pruning until a reconcile run publishes a current full catalog. */
-async function assertPruneCatalog(env: Env, tickers: string[], sessionDate: string): Promise<{ inputClock: number; quarantined: Set<string> }> {
-  const db = getMarketDataDb(env), key = `${sessionDate}:${JSON.stringify(tickers)}`;
+async function assertPruneCatalog(env: Env, tickers: string[], sessionDate: string, allowPopulationChange = false): Promise<{ inputClock: number; quarantined: Set<string> }> {
+  const db = getMarketDataDb(env), key = `${sessionDate}:${allowPopulationChange}:${JSON.stringify(tickers)}`;
   const readHead = () => db.prepare(`SELECT id,payload_checksum as checksum,
     (SELECT revision FROM eod_input_clock WHERE id='default') as inputClock
     FROM eod_publications WHERE scope=? AND session_date=? AND status='accepted'
@@ -118,13 +120,15 @@ async function assertPruneCatalog(env: Env, tickers: string[], sessionDate: stri
   try { payload = JSON.parse(publication?.payload ?? "null") as {rows?:unknown}; } catch { return defer("catalog JSON is invalid"); }
   if (!payload || publication?.codec !== "json" || await eodHash(payload) !== head.checksum) return defer("catalog checksum or codec is invalid");
   const rows = payload.rows;
-  if (!Array.isArray(rows) || rows.length !== tickers.length) return defer("catalog population is incomplete");
+  if (!Array.isArray(rows) || (!allowPopulationChange && rows.length !== tickers.length) || rows.length > 10_000) return defer("catalog population is incomplete");
   const actual = new Set(rows.map((row) => Array.isArray(row) ? row[0] : null));
-  if (actual.size !== tickers.length || tickers.some((ticker) => !actual.has(ticker))) return defer("catalog population differs from maintenance");
-  let quarantined = new Set<string>();
+  if (actual.size !== rows.length || [...actual].some(value => typeof value !== "string")
+    || (!allowPopulationChange && tickers.some((ticker) => !actual.has(ticker)))) return defer("catalog population differs from maintenance");
+  const catalogTickers = [...actual] as string[];
+  let quarantined = new Set<string>(tickers.filter(ticker => !actual.has(ticker)));
   try {
     if (rows.some(row => Array.isArray(row) && row.length > 10)) {
-      quarantined = new Set((await validateEodCatalogQuarantineState(env, { catalog: payload, tickers, sessionDate })).keys());
+      for (const ticker of (await validateEodCatalogQuarantineState(env, { catalog: payload, tickers: catalogTickers, sessionDate })).keys()) quarantined.add(ticker);
     }
     await loadEodCatalogRows(env, tickers.filter(ticker => !quarantined.has(ticker)), sessionDate);
   } catch (error) {
@@ -171,6 +175,18 @@ function relocationStatements(db: D1Database, bars: MarketHistoryBar[], cutoffDa
   ];
 }
 
+/** One indexed query per 100 securities, bounded to the retained window. */
+export async function loadHistoryRetentionCutoffs(db: D1Database, tickers: string[], feed: string, endDate: string, hotSessions: number) {
+  if (tickers.length > 100 || ![90, 260].includes(hotSessions)) throw new Error("eod-retention-selection-invalid");
+  return (await db.prepare(`SELECT CAST(t.value AS TEXT) AS ticker,
+    (SELECT date FROM alpaca_daily_bars b WHERE b.feed=? AND b.ticker=t.value AND b.date<=?
+      ORDER BY date DESC LIMIT 1 OFFSET ?) AS cutoffDate,
+    (SELECT status FROM eod_adjustment_repairs r WHERE r.feed=? AND r.ticker=t.value) AS repairStatus
+    FROM json_each(?) t /* eod-retention-cutoffs */`)
+    .bind(feed, endDate, hotSessions - 1, feed, JSON.stringify(tickers))
+    .all<{ ticker: string; cutoffDate: string | null; repairStatus: string | null }>()).results;
+}
+
 /**
  * Explicit maintenance entry point for the Node runner. It is never called by a page read.
  * Each row's financial values and source identity are archived, read back and
@@ -188,6 +204,7 @@ export async function archiveAndPruneMarketHistory(env: MaintenanceEnv, input: {
   capacity: HistoryCapacityEvidence;
   readers: HistoryReaderEvidence;
   now?: Date;
+  catalogSessionDate?: string;
 }): Promise<{
   status: "disabled" | "complete" | "partial";
   cursor: HistoryMaintenanceCursor | null;
@@ -199,7 +216,7 @@ export async function archiveAndPruneMarketHistory(env: MaintenanceEnv, input: {
   if (!env.MARKET_HISTORY_DB || !["shadow", "active"].includes(env.EOD_RUNNER_MODE ?? "")) {
     throw new Error("Archive binding and migrated EOD storage are required before maintenance.");
   }
-  assertHistoryPruneEvidence(input.capacity, input.readers, input.now, env.EOD_CODE_REVISION);
+  assertHistoryPruneEvidence(input.capacity, input.readers, input.now, env.EOD_CODE_REVISION, env.EOD_BUDGET_PROFILE);
   const tickers = Array.from(new Set(input.tickers.map((ticker) => ticker.trim().toUpperCase()).filter(Boolean))).sort();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(input.endDate)
     || !Number.isFinite(Date.parse(`${input.endDate}T00:00:00Z`))
@@ -216,52 +233,76 @@ export async function archiveAndPruneMarketHistory(env: MaintenanceEnv, input: {
   // The full catalog and its global correction clock cover the publication
   // inputs. Yahoo relocation uses the same exact row identity/clock transaction;
   // it never changes Yahoo revisions or certifies Yahoo volume as SIP volume.
-  const catalog = await assertPruneCatalog(env, tickers, input.endDate);
+  const catalogDate = input.catalogSessionDate ?? input.endDate;
+  const catalog = await assertPruneCatalog(env, tickers, catalogDate, input.catalogSessionDate !== undefined);
   const deferredRepairs = new Set<string>();
   const diagnostics = () => deferredRepairs.size ? { deferredRepairs: [...deferredRepairs].sort() } : {};
   let archivedRows = 0;
   let deletedRows = 0;
   let concurrentCorrections = 0;
-  for (let tickerIndex = startIndex; tickerIndex < tickers.length; tickerIndex += 1) {
-    const ticker = tickers[tickerIndex];
-    // An unavailable catalog is evidence to preserve this security's rows,
-    // never authority to delete them or block maintenance for other members.
-    if (catalog.quarantined.has(ticker)) { deferredRepairs.add(ticker); continue; }
-    const repair = await db.prepare("SELECT status FROM eod_adjustment_repairs WHERE feed=? AND ticker=?")
-      .bind(feed,ticker).first<{status:string}>();
-    if (repair?.status === "pending") { deferredRepairs.add(ticker); continue; }
-    const cutoff = await db.prepare(`SELECT MIN(date) as cutoffDate, COUNT(*) as retainedRows FROM (
-      SELECT date FROM alpaca_daily_bars WHERE feed = ? AND ticker = ? AND date <= ? ORDER BY date DESC LIMIT ?
-    )`).bind(feed, ticker, input.endDate, hotSessions).first<{ cutoffDate: string | null; retainedRows: number }>();
-    if (!cutoff?.cutoffDate || Number(cutoff.retainedRows) < hotSessions) continue;
-    const afterDate = tickerIndex === startIndex ? input.cursor?.afterDate ?? "0001-01-01" : "0001-01-01";
-    const remaining = maxRows - archivedRows;
-    const candidates = (await db.prepare(`SELECT ticker,date,o,h,l,c,volume,reported_volume as reportedVolume,reported_volume_collected_at as reportedVolumeCollectedAt,feed,
-      source_provider as sourceProvider,adjustment,observed_at as observedAt,fetched_at as fetchedAt
-      FROM alpaca_daily_bars WHERE feed = ? AND ticker = ? AND date < ? AND date > ? ORDER BY date LIMIT ?`)
-      .bind(feed, ticker, cutoff.cutoffDate, afterDate, remaining).all<MarketHistoryBar>()).results ?? [];
-    if (!candidates.length) continue;
-    await archiveMarketHistoryBars(env, candidates, { verifiedHotRelocation: true });
-    const archived = await loadVerifiedArchivedMarketHistory(env, {
-      tickers: [ticker], feed, startDate: candidates[0].date, endDate: candidates.at(-1)!.date,
+  const concurrency = feed === "sip" ? 8 : 4;
+  const archiveEnv = { ...env, MARKET_DATA_DB: retentionDatabase(db, concurrency),
+    MARKET_HISTORY_DB: retentionDatabase(env.MARKET_HISTORY_DB, concurrency) };
+  for (let offset = startIndex; offset < tickers.length; offset += 100) {
+    const selection = tickers.slice(offset, offset + 100);
+    const cutoffs = await loadHistoryRetentionCutoffs(db, selection, feed, input.endDate, hotSessions);
+    const eligible = cutoffs.filter((row) => {
+      if (row.repairStatus === "pending" || catalog.quarantined.has(row.ticker)) { deferredRepairs.add(row.ticker); return false; }
+      return row.cutoffDate !== null;
     });
-    const byDate = new Map(archived.map((bar) => [bar.date, bar]));
-    for (const candidate of candidates) {
-      const verified = byDate.get(candidate.date);
-      if (!verified || !marketHistoryBarsMateriallyEqual(candidate, verified)) {
-        throw new Error(`Archive parity failed for ${ticker} ${candidate.date}; no candidate rows were pruned.`);
+    for (let batchStart = 0; batchStart < eligible.length; batchStart += 25) {
+      const batch = eligible.slice(batchStart, batchStart + 25);
+      const results = await db.batch<MarketHistoryBar>(batch.map((row) => db.prepare(`SELECT ticker,date,o,h,l,c,volume,
+        reported_volume as reportedVolume,reported_volume_collected_at as reportedVolumeCollectedAt,feed,
+        source_provider as sourceProvider,adjustment,observed_at as observedAt,fetched_at as fetchedAt
+        FROM alpaca_daily_bars WHERE feed=? AND ticker=? AND date<? AND date>? ORDER BY date LIMIT ?
+        /* eod-retention-candidates */`).bind(feed, row.ticker, row.cutoffDate,
+          row.ticker === tickers[startIndex] ? input.cursor?.afterDate ?? "0001-01-01" : "0001-01-01", maxRows)));
+      const work: Array<{ tickerIndex: number; cutoffDate: string; bars: MarketHistoryBar[] }> = [];
+      let selected = 0;
+      for (let index = 0; index < batch.length; index++) {
+        const bars = results[index].results.slice(0, maxRows - archivedRows - selected);
+        if (bars.length) work.push({ tickerIndex: offset + selection.indexOf(batch[index].ticker), cutoffDate: batch[index].cutoffDate!, bars });
+        selected += bars.length;
+      }
+      for (let index = 0; index < work.length; index += concurrency) {
+        const group = work.slice(index, index + concurrency);
+        // Concurrent securities share REST calls, but each archive's write,
+        // read-back, checksum and pointer promotion retain their dependencies.
+        const attempts = await Promise.allSettled(group.map(async ({ bars }) => {
+          await archiveMarketHistoryBars(archiveEnv, bars, { verifiedHotRelocation: true });
+          const archived = await loadVerifiedArchivedMarketHistory(archiveEnv, {
+            tickers: [bars[0].ticker], feed, startDate: bars[0].date, endDate: bars.at(-1)!.date,
+          });
+          const byDate = new Map(archived.map((bar) => [bar.date, bar]));
+          for (const candidate of bars) {
+            const verified = byDate.get(candidate.date);
+            if (!verified || !marketHistoryBarsMateriallyEqual(candidate, verified)) {
+              throw new Error(`Archive parity failed for ${candidate.ticker} ${candidate.date}; no candidate rows were pruned.`);
+            }
+          }
+        }));
+        const failed = attempts.find((attempt) => attempt.status === "rejected");
+        if (failed?.status === "rejected") throw failed.reason;
+        const { inputClock } = await assertPruneCatalog(env, tickers, catalogDate, input.catalogSessionDate !== undefined);
+        const deletes = group.flatMap(({ bars, cutoffDate }) => {
+          const statements: D1PreparedStatement[][] = [];
+          for (let offset = 0; offset < bars.length; offset += 40) statements.push(relocationStatements(db, bars.slice(offset, offset + 40), cutoffDate, inputClock));
+          return statements;
+        });
+        for (let offset = 0; offset < deletes.length; offset += 12) {
+          const results = await db.batch<{ date: string }>(deletes.slice(offset, offset + 12).flat());
+          for (let index = 1; index < results.length; index += 3) deletedRows += results[index].results.length;
+        }
+        archivedRows += group.reduce((total, item) => total + item.bars.length, 0);
+        concurrentCorrections = archivedRows - deletedRows;
+      }
+      if (archivedRows >= maxRows) {
+        const last = work.at(-1)!;
+        return { status: "partial", cursor: { tickerIndex: last.tickerIndex, afterDate: last.bars.at(-1)!.date },
+          archivedRows, deletedRows, concurrentCorrections, ...diagnostics() };
       }
     }
-    for (let offset = 0; offset < candidates.length; offset += 40) {
-      const { inputClock } = await assertPruneCatalog(env, tickers, input.endDate);
-      const result = await db.batch<{ date: string }>(relocationStatements(db, candidates.slice(offset, offset + 40), cutoff.cutoffDate, inputClock));
-      deletedRows += result[1].results.length;
-    }
-    archivedRows += candidates.length;
-    concurrentCorrections = archivedRows - deletedRows;
-    if (archivedRows >= maxRows) return {
-      status: "partial", cursor: { tickerIndex, afterDate: candidates.at(-1)!.date }, archivedRows, deletedRows, concurrentCorrections, ...diagnostics(),
-    };
   }
   return { status: deferredRepairs.size ? "partial" : "complete", cursor: null, archivedRows, deletedRows, concurrentCorrections, ...diagnostics() };
 }

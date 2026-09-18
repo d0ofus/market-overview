@@ -79,6 +79,33 @@ describe("EOD durable coordinator against SQLite", { timeout: 30_000 }, () => {
   });
   const storedRun = (id: string) => ops.db.prepare("SELECT * FROM eod_runs WHERE id=?").bind(id).first<EodRun>();
   const posts = () => github.mock.calls.filter(([, init]) => init?.method === "POST");
+  it("runs retention in the morning and prioritizes current delivery without replaying old daily work", async () => {
+    const morning = new Date("2026-09-09T11:00:00Z");
+    await enqueueEodRun(env,"2026-09-04","daily",morning);
+    const current = await enqueueEodRun(env,"2026-09-08","daily",morning);
+    const maintenance = await enqueueEodRun(env,"2026-09-08","maintenance",morning);
+    await dispatchEodRun(env,maintenance,morning);
+    expect(posts()).toHaveLength(0);
+    await ops.db.prepare("UPDATE eod_runs SET status='completed',completed_input_clock=0 WHERE id=?").bind(current.id).run();
+    await dispatchEodRun(env,maintenance,morning);
+    expect(posts()).toHaveLength(1);
+    expect(JSON.parse(String(posts()[0][1]?.body)).inputs.run_id).toBe(maintenance.id);
+  });
+
+  it("does not dispatch retention during the EOD window", async () => {
+    const run = await enqueueEodRun(env,"2026-09-04","maintenance",now);
+    await dispatchEodRun(env,run,new Date("2026-09-08T21:00:00Z"));
+    expect(posts()).toHaveLength(0);
+  });
+
+  it("leaves old unfinished daily sessions as diagnostics instead of automatically reconstructing history", async () => {
+    const old = await enqueueEodRun(env,"2026-09-04","daily",now);
+    const current = await enqueueEodRun(env,"2026-09-08","daily",now);
+    await ops.db.prepare("UPDATE eod_runs SET status='completed',completed_input_clock=0 WHERE id=?").bind(current.id).run();
+    await coordinateEod(env,new Date("2026-09-09T01:00:00Z"));
+    expect(posts()).toHaveLength(0);
+    expect((await storedRun(old.id))?.status).toBe("queued");
+  });
   const activeGithub = (id: string, status = "queued") => ({ id: 42, display_title: `EOD ${id}`,
     status, head_branch: "main", event: "workflow_dispatch" });
   async function publish(scope: string, acceptedAt: string, sessionDate = "2026-09-08", revision = 1) {

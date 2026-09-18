@@ -94,7 +94,7 @@ describe("history archive and retention against real SQLite", { timeout: 20_000 
       .toMatchObject({ status: "partial", cursor: null, deletedRows: 0, deferredRepairs: ["AAA"] });
     await market.db.prepare("UPDATE eod_adjustment_repairs SET status='complete',owner_token=NULL WHERE feed='yahoo-eod'").run();
     const wrapped = { prepare: market.db.prepare.bind(market.db), batch: async (statements: D1PreparedStatement[]) => {
-      await market.db.prepare("UPDATE eod_adjustment_repairs SET status='pending',owner_token='raced' WHERE feed='yahoo-eod'").run();
+      if (String((statements[0] as unknown as {sql:string}).sql).includes("eod-history-relocation-register")) await market.db.prepare("UPDATE eod_adjustment_repairs SET status='pending',owner_token='raced' WHERE feed='yahoo-eod'").run();
       return market.db.batch(statements);
     } } as D1Database;
     const result = await archiveAndPruneMarketHistory({ ...env, MARKET_DATA_DB: wrapped }, { tickers: ["AAA"], endDate: rows.at(-1)!.date,
@@ -106,7 +106,7 @@ describe("history archive and retention against real SQLite", { timeout: 20_000 
   it("keeps an independently corrected hot row when the archived value no longer matches", async () => {
     let corrected = false;
     const wrapped = { prepare: market.db.prepare.bind(market.db), batch: async (statements: D1PreparedStatement[]) => {
-      if (!corrected) {
+      if (!corrected && String((statements[0] as unknown as {sql:string}).sql).includes("eod-history-relocation-register")) {
         corrected = true;
         await market.db.prepare("UPDATE alpaca_daily_bars SET c=10.75,reported_volume=9999 WHERE date=?").bind(rows[0].date).run();
       }
@@ -212,6 +212,7 @@ describe("history archive and retention against real SQLite", { timeout: 20_000 
 
   it("rolls back hot deletion and transient markers if the final transaction statement fails", async () => {
     const wrapped = { prepare: market.db.prepare.bind(market.db), batch: async (statements: D1PreparedStatement[]) => {
+      if (!String((statements[0] as unknown as {sql:string}).sql).includes("eod-history-relocation-register")) return market.db.batch(statements);
       // The market transaction's third statement is marker cleanup; archive
       // publication uses the independent history database.
       return market.db.batch([...statements.slice(0, 2), market.db.prepare("INSERT INTO missing_test_table VALUES(1)")]);

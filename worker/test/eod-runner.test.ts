@@ -58,9 +58,9 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
     });
     await expect(runEodBatch(env,runId)).rejects.toThrow("d1-capacity-test");
     expect(await market.db.prepare("SELECT COUNT(*) as n FROM eod_publication_pointers").first()).toEqual({n:6});
-    expect(await ops.db.prepare("SELECT status,lease_token FROM eod_runs WHERE id=?").bind(runId).first()).toMatchObject({status:"retrying",lease_token:null});
+    expect(await ops.db.prepare("SELECT status,lease_token FROM eod_runs WHERE id=?").bind(runId).first()).toMatchObject({status:"failed",lease_token:null});
     expect(await ops.db.prepare("SELECT next_attempt_at FROM eod_runs WHERE id=?").bind(runId).first<string>("next_attempt_at"))
-      .toBe(new Date(new Date().setUTCHours(24,5,0,0)).toISOString());
+      .toBeNull();
     calls.alpaca.mockImplementation(normal);
     expect((await runEodBatch(env,runId)).status).toBe("completed");
     expect(await market.db.prepare("SELECT COUNT(*) as n FROM eod_publications").first()).toEqual({n:7});
@@ -141,7 +141,7 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
     calls.alpaca.mockClear();calls.yahoo.mockClear();calls.alpaca.mockImplementation(prices);
   }
 
-  it("resumes a planned slice past short-history chunks while ordinary recovery still refetches them",async()=>{
+  it("resumes complete daily checkpoints without refetching a missing long horizon",async()=>{
     await interruptShortHistorySlice();
     expect((await runEodBatch(env,runId,ops.db,{storageInputs:sliceInputs})).status).toBe("retrying");
     expect(calls.alpaca.mock.calls.every(([tickers])=>tickers.length===1 && tickers[0]==="MISSING24")).toBe(true);
@@ -156,7 +156,7 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
     calls.alpaca.mockImplementation(async(tickers:string[],start:string,_target:string,adjustment="split")=>tickers.flatMap(ticker=>
       dates.filter(date=>date>=start).map(date=>({...makeBar(date),ticker,adjustment}))));
     expect((await runEodBatch(env,runId,ops.db,{storageInputs:sliceInputs})).status).toBe("completed");
-    expect(calls.alpaca.mock.calls.some(([tickers])=>tickers.includes("MISSING0"))).toBe(true);
+    expect(calls.alpaca.mock.calls.some(([tickers])=>tickers.includes("MISSING0"))).toBe(false);
     expect(calls.alpaca.mock.calls.some(([tickers])=>tickers.includes("MISSING24"))).toBe(true);
   },60_000);
 
@@ -377,10 +377,10 @@ describe("EOD resumable runner with real publication and lease SQL", {timeout:30
     } finally {history.dispose();}
   },60_000);
 
-  it("requires approved storage inputs for planned slice checkpoint reuse",async()=>{
+  it("reuses complete daily prices independently of the old migration slice approval",async()=>{
     await interruptShortHistorySlice();
     expect((await runEodBatch(env,runId)).status).toBe("retrying");
-    expect(calls.alpaca.mock.calls.some(([tickers])=>tickers.includes("MISSING0"))).toBe(true);
+    expect(calls.alpaca.mock.calls.some(([tickers])=>tickers.includes("MISSING0"))).toBe(false);
   },60_000);
 
   it.each([

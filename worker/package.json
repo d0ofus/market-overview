@@ -16,7 +16,7 @@
     "legacy-rs-cache:direct-cleanup": "node --preserve-symlinks-main ./scripts/direct-d1-legacy-rs-cleanup.mjs",
     "legacy-daily-bars:cleanup": "node --preserve-symlinks-main ./scripts/cleanup-legacy-daily-bars.mjs",
     "seed:perplexity-cache": "wrangler d1 execute market_perplexity_cache --local --file=./perplexity-cache-migrations/0001_perplexity_finance_cache.sql",
-    "seed:market-data": "wrangler d1 migrations apply market_prices --local",
+    "seed:market-data": "wrangler d1 migrations apply MARKET_DATA_DB --local",
     "seed:ops": "wrangler d1 migrations apply market_ops --local",
     "backfill:market-publication": "node ./scripts/backfill-market-publication-state.mjs",
     "seed:ops:remote": "node ./scripts/seed-market-ops.mjs",

@@ -12,9 +12,10 @@ import { zonedParts } from "./refresh-timing";
 import { writeEodBars } from "./eod-bar-store";
 import { repairEodSecurity, repairEodYahoo, type EodRevisionChange } from "./eod-price-repair";
 import { loadApprovedStorageHotSessions } from "./eod-storage-history-capacity";
-import { cleanupEodRunState } from "./eod-run-maintenance";
 import { runEodHistoryWork } from "./eod-history-runner";
 import { ProviderBudgetExceededError } from "./provider-usage";
+import { eodFailurePolicy } from "./eod-failure-policy";
+import { runEodRetention } from "./eod-retention-runner";
 import { encodeEodPayload,decodeEodPayload } from "./eod-publication-codec";
 import { buildEodCatalogRow,encodeEodCatalogPayload,EOD_CATALOG_SCOPE,EOD_CATALOG_METHODOLOGY_VERSION,type EodCatalogCheckpointRow } from "./eod-catalog-service";
 import { assessEodMembershipEvidence } from "./eod-membership-evidence";
@@ -211,7 +212,13 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
   const published:string[]=[];
   try {
     checkContinuation();
-    await cleanupEodRunState(env,{maxRows:1000});
+    if (run.purpose === "maintenance") {
+      const result = await runEodRetention(env, runId, progress);
+      await runDb.prepare(`UPDATE eod_runs SET status='completed',stage='finished',progress_json=?,lease_until=NULL,
+        lease_token=NULL,completed_at=?,updated_at=?,next_attempt_at=NULL,error_code=NULL,error_message=NULL WHERE id=? AND lease_token=?`)
+        .bind(JSON.stringify(result),new Date().toISOString(),new Date().toISOString(),runId,lease).run();
+      return {status:"completed",published:[]};
+    }
     checkContinuation();
     await ensureMarketCalendarCoverage(env,run.session_date);
     const session=await env.MARKET_DATA_DB.prepare("SELECT close_at as closeAt FROM market_calendar_sessions WHERE session_date=?")
@@ -282,12 +289,12 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
     // calculations. Revision manifests still invalidate corrected price inputs.
     const inputHash=await eodHash(inputs.listingEvidence ? [inputs.methodologyVersion,inputs.calendarDates,inputs.listingEvidence.evidenceHash]
       : [inputs.methodologyVersion,inputs.calendarDates]);
-    if (run.purpose==="backfill" || run.purpose==="maintenance") {
+    if (run.purpose==="backfill") {
       const selection=eodRunHistorySelection(run);
       const result=await runEodHistoryWork(env,{runId,sessionDate:run.session_date,
-        tickers:run.purpose==="backfill" ? selection.historyTickers ?? inputs.tickers : inputs.tickers,
-        historySessions:run.purpose==="backfill" ? selection.historySessions : 520,
-        calendarDates:inputs.calendarDates,progress,reconcileHistory:run.purpose==="maintenance"});
+        tickers:selection.historyTickers ?? inputs.tickers,
+        historySessions:selection.historySessions,
+        calendarDates:inputs.calendarDates,progress});
       const blockedBackfill=run.purpose==="backfill" && Object.keys(result.deepWork.blocked).length>0;
       const deferredBackfill=run.purpose==="backfill" && result.deepWork.nextAttemptAt;
       if (blockedBackfill) {
@@ -370,12 +377,8 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
         publishedScopes.add(scope);
       }
     };
-    // A planned 65-minute migration slice resumes already calculated daily
-    // chunks. Missing long horizons stay null; an ordinary retry or a new
-    // session must still attempt to recover them. Check both fields because a
-    // later incomplete-publication result may retain the old error message.
-    const resumePlannedSlice=Boolean(options.storageInputs)
-      && run.error_code==="runner-error" && run.error_message==="storage-run-time-slice-complete";
+    // Daily checkpoints retain valid current prices even when a longer metric
+    // is unavailable. Morning reconciliation revisits the missing history.
     let yahooAttempts=0;
     for (const [index,tickers] of chunks(inputs.tickers,25).entries()) {
       await progress("prices",{chunk:index,total:Math.ceil(inputs.tickers.length/25),symbols:features.size});
@@ -397,8 +400,7 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
           && tickers.every((ticker) => { const lifecycle=getEtfLifecycle(ticker); return !lifecycle || run.session_date<=lifecycle.lastTradingDate; })
           && cached.features.every(([ticker,feature]) => feature.price!==null && (inputs.listingEvidence
             ? (feature.change1d!==null || !eodListingEligible(listingDateFor(inputs.listingEvidence,ticker),inputs.calendarDates,2))
-              && (feature.above200Sma!==null || resumePlannedSlice || !eodListingEligible(listingDateFor(inputs.listingEvidence,ticker),inputs.calendarDates,200))
-            : feature.change1d!==null && (feature.above200Sma!==null || resumePlannedSlice)))) {
+            : feature.change1d!==null))) {
           cached.features.forEach(([ticker,feature]) => features.set(ticker,feature));
           cached.catalogRows.forEach((row) => catalogRows.set(row.ticker,row));
           revisions.push(...cached.revisions); Object.assign(errors,cached.errors);
@@ -560,8 +562,7 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
         let metric=calculate();
         const needsFallback=inputs.listingEvidence ? metric.price===null
           || (metric.change1d===null && eodListingEligible(listingDateFor(inputs.listingEvidence,ticker),inputs.calendarDates,2))
-          || (metric.above200Sma===null && eodListingEligible(listingDateFor(inputs.listingEvidence,ticker),inputs.calendarDates,200))
-          : metric.price===null || metric.change1d===null || metric.above200Sma===null;
+          : metric.price===null || metric.change1d===null;
         if (!closed && !listingQuarantined && needsFallback && yahooAttempts<200) {
           yahooAttempts++;
           try {
@@ -630,13 +631,13 @@ export async function runEodBatch(env:Env,runId:string,controlDb:D1Database = en
     return {status:complete ? "completed" : "retrying",published};
   } catch(error) {
     const message=error instanceof Error ? error.message : "eod-run-failed";
-    const budget=/budget|quota|capacity/i.test(message);
+    const failure=eodFailurePolicy(message);
     const plannedSlice=Boolean(options.storageInputs) && error instanceof EodBatchInterruptedError
       && message==="storage-run-time-slice-complete";
-    const next=plannedSlice ? new Date() : budget ? new Date(new Date().setUTCHours(24,5,0,0)) : new Date(Date.now()+15*60_000);
-    await controlDb.prepare(`UPDATE eod_runs SET status='retrying',error_code=?,error_message=?,lease_until=NULL,
+    const next=plannedSlice ? new Date().toISOString() : failure.nextAttemptAt;
+    await controlDb.prepare(`UPDATE eod_runs SET status=?,error_code=?,error_message=?,lease_until=NULL,
       lease_token=NULL,next_attempt_at=?,updated_at=? WHERE id=? AND lease_token=?`)
-      .bind(budget ? "resource-budget" : "runner-error",message.slice(0,500),next.toISOString(),new Date().toISOString(),runId,lease).run();
+      .bind(failure.status,failure.code,message.slice(0,500),next,new Date().toISOString(),runId,lease).run();
     throw error;
   } finally {
     clearInterval(heartbeat);

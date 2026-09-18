@@ -14,6 +14,14 @@ describe("EOD credit envelopes against real SQLite", { timeout: 20_000 }, () => 
   afterEach(() => storage.dispose());
   const usage = () => storage.db.prepare("SELECT usage_date as date,rows_read as reads,rows_written as writes,reserved_reads as reservedReads,reserved_writes as reservedWrites FROM eod_usage ORDER BY usage_date").all();
 
+  it("settles the measured 63,200-read catalog lookup inside the revised reservation", async () => {
+    const admission=createEodAdmission(storage.db,"catalog",{now:()=>time});
+    const settle=await admission([{sql:"SELECT payload_json FROM eod_publications /* eod-history-catalog-read */",params:[]}]);
+    await settle({rowsRead:63_200,rowsWritten:0,sizeAfter:137_000_000});
+    await admission.flush();
+    expect((await usage()).results[0]).toMatchObject({reads:63_220,reservedReads:0,reservedWrites:0});
+  });
+
   it("reserves both populated FK index builds and records their actual cost", async () => {
     const admission = createEodAdmission(storage.db, "history-index-build", { now: () => time });
     const queries = EOD_HISTORY_POINTER_INDEX_DDL.map((sql) => ({sql,params:[]}));

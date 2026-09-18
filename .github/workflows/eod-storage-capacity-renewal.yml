@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   renew:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && vars.EOD_STORAGE_POLICY != 'paid-daily-v2'
     runs-on: ubuntu-24.04
     timeout-minutes: 80
     environment: market-eod

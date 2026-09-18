@@ -6,6 +6,7 @@ import { reconcileEodAccountUsage } from "../src/eod-account-usage";
 import { collectEodRolloutMonitoring, finalizeRecentEodUsage } from "../src/eod-rollout-monitor";
 import { refreshApprovedStorageHistoryCapacity } from "../src/eod-storage-history-capacity";
 import type { Env } from "../src/types";
+import { loadDailyRelease, sampleDailyStorage } from "../src/eod-daily-release";
 
 function required(name: string): string {
   const value = process.env[name]?.trim();
@@ -50,7 +51,8 @@ async function main(): Promise<void> {
     // A separate daily capacity pass is independent of archive pruning. It
     // samples the accepted layout only after public activation and never moves
     // the forecast horizon simply because another day elapsed.
-    if (env.EOD_RUNNER_MODE === "active") await refreshApprovedStorageHistoryCapacity(env);
+    if (await loadDailyRelease(env)) await sampleDailyStorage({ accountId, token, ops: env.OPS_DB! });
+    else if (env.EOD_RUNNER_MODE === "active") await refreshApprovedStorageHistoryCapacity(env);
   } finally {
     await admission.flush();
   }

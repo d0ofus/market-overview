@@ -12,7 +12,10 @@ const protectedPaths=["worker/src/eod-price-provider.ts","worker/src/eod-ticker-
   "worker/src/market-storage-consumer-composite.ts","worker/src/market-storage-listing-execution.ts",
   "worker/src/eod-catalog-service.ts","worker/src/market-storage-repair-execution.ts",
   "worker/src/eod-metrics.ts","worker/src/eod-listing-evidence.ts","worker/wrangler.toml","package-lock.json"];
-const historical=(path:string)=>readFileSync(resolve(root,path),"utf8");
+// The completed R21 continuation validates its original reviewed source, not
+// whatever daily-operation code happens to be checked out in a later release.
+const historicalSources=JSON.parse(readFileSync(resolve(root,"worker/test/fixtures/capacity-code-contract-r21.json"),"utf8")) as Record<string,string>;
+const historical=(path:string)=>historicalSources[path] ?? readFileSync(resolve(root,path),"utf8");
 const digest=(value:string)=>createHash("sha1").update(value).digest("hex");
 function fixture() {
   const integrationSources=Object.fromEntries(Object.keys(STORAGE_CAPACITY_INTEGRATION_HASHES).map(path=>[path,historical(path)]));

@@ -52,15 +52,15 @@ describe("bounded history maintenance", () => {
     const catalogRead = vi.spyOn(catalog, "loadEodCatalogRows").mockResolvedValue(new Map());
     const archive = vi.spyOn(history, "archiveMarketHistoryBars").mockResolvedValue({ blocks: [], rowsRead: 0, rowsWritten: 0, revisionChanges: [] });
     const read = vi.spyOn(history, "loadVerifiedArchivedMarketHistory").mockResolvedValue([]);
-    const batch = vi.fn();
+    const batch = vi.fn(async (statements: Array<{ sql?: string }>) => statements.map(() => ({results:[oldBar]})));
     const db = {
       prepare(sql: string) {
         const statement = {
-          bind: (..._args: unknown[]) => statement,
+          sql, bind: (..._args: unknown[]) => statement,
           first: async () => sql.includes("inputClock") ? { id: "catalog", checksum: catalogData.checksum, inputClock: 1 }
             : sql.includes("payload_json") ? { payload: catalogData.payload, codec: "json" }
               : { cutoffDate: "2025-08-01", retainedRows: 260 },
-          all: async () => ({ results: [oldBar] }),
+          all: async () => ({ results: sql.includes("eod-retention-cutoffs") ? [{ticker:"AAA",cutoffDate:"2025-08-01",repairStatus:null}] : [oldBar] }),
         };
         return statement;
       }, batch,
@@ -70,7 +70,8 @@ describe("bounded history maintenance", () => {
       await expect(archiveAndPruneMarketHistory(env, { tickers: ["AAA"], endDate: "2026-09-04", capacity, readers, now }))
         .rejects.toThrow(/Archive parity failed/);
       expect(archive).toHaveBeenCalledOnce();
-      expect(batch).not.toHaveBeenCalled();
+      expect(batch).toHaveBeenCalledOnce();
+      expect(batch.mock.calls[0][0][0].sql).toContain("eod-retention-candidates");
     } finally { archive.mockRestore(); read.mockRestore(); catalogRead.mockRestore(); }
   });
 
@@ -88,11 +89,12 @@ describe("bounded history maintenance", () => {
           first: async () => sql.includes("inputClock") ? { id: "catalog", checksum: catalogData.checksum, inputClock: 1 }
             : sql.includes("payload_json") ? { payload: catalogData.payload, codec: "json" }
               : { cutoffDate: "2025-08-01", retainedRows: 260 },
-          all: async () => ({ results: [oldBar] }),
+          all: async () => ({ results: sql.includes("eod-retention-cutoffs") ? [{ticker:"AAA",cutoffDate:"2025-08-01",repairStatus:null}] : [oldBar] }),
         };
         return statement;
       },
       batch: async (statements: Array<{ sql: string; args: unknown[] }>) => {
+        if (statements.every(row => row.sql.includes("eod-retention-candidates"))) return statements.map(() => ({ results: [oldBar], meta: {changes:0} }));
         writes.push(...statements);
         // SQLite reports no match when a value changed since the archived read.
         return statements.map(() => ({ results: [], meta: { changes: 0 } }));
@@ -110,7 +112,7 @@ describe("bounded history maintenance", () => {
       expect(writes[1].sql).toContain("relocation.bar_identity IS json_array");
       expect(writes[1].sql).toContain("RETURNING date");
       expect(writes[2].sql).toContain("eod-history-relocation-cleanup");
-      expect(archive).toHaveBeenCalledWith(env, [oldBar], { verifiedHotRelocation: true });
+      expect(archive).toHaveBeenCalledWith(expect.objectContaining({EOD_ARCHIVE_PRUNE_ENABLED:"true"}), [oldBar], { verifiedHotRelocation: true });
     } finally { archive.mockRestore(); read.mockRestore(); catalogRead.mockRestore(); }
   });
 });

@@ -14,11 +14,11 @@ OVERVIEW_PUBLICATION_RECOVERY_ENABLED = "true"
 MARKET_DATA_DB_REQUIRED = "true"
 OPS_DB_REQUIRED = "true"
 MARKET_PIPELINE_MODE = "canary"
-EOD_RUNNER_MODE = "shadow"
-EOD_READ_ENABLED = "false"
+EOD_RUNNER_MODE = "active"
+EOD_READ_ENABLED = "true"
 EOD_BUDGET_PROFILE = "paid"
 EOD_CLOUDFLARE_ACCOUNT_ID = "5ddf4343b603f05fed83f9e102b4b553"
-EOD_ARCHIVE_PRUNE_ENABLED = "false"
+EOD_ARCHIVE_PRUNE_ENABLED = "true"
 EOD_GITHUB_REPOSITORY = "d0ofus/market-overview"
 # Default-valued budget, retention, provider-warning and options settings are
 # resolved by their service modules. Avoid redundant bindings: the free plan
@@ -68,8 +68,8 @@ database_id = "30528f34-b249-4d93-9b18-1d60a36df85d"
 
 [[d1_databases]]
 binding = "MARKET_DATA_DB"
-database_name = "market_prices"
-database_id = "a6dedc93-6ffc-4793-9b3d-0ef47e29c4b8"
+database_name = "market-prices-eod-2026-09-08-2895f501fe75"
+database_id = "11888597-340a-4915-9d3e-edfc4326da82"
 migrations_dir = "market-data-migrations"
 
 [[d1_databases]]

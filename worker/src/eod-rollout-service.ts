@@ -12,6 +12,7 @@ import { collectEodRolloutMonitoring } from "./eod-rollout-monitor";
 import { EOD_RETIREMENT_POLICY_VERSION, EOD_RETIREMENT_REQUIRED_SESSIONS } from "./eod-retirement-policy";
 import { isEodCurrentHealthReady } from "./eod-current-health";
 import type { Env } from "./types";
+import { loadDailyRelease, assertDailyReleaseBindings } from "./eod-daily-release";
 
 const universeIds = ["sp500-core", "nasdaq-core", "nyse-core", "russell2000-core", "overall-market-proxy"] as const;
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
@@ -206,6 +207,14 @@ export async function assertEodCutover(env: Env, codeRevision: string, candidate
   if (env.EOD_RUNNER_MODE !== "active") return null;
   if (!env.OPS_DB || !env.MARKET_DATA_DB || !env.MARKET_HISTORY_DB) fail("bindings-missing");
   assertIdentity(codeRevision, codeRevision);
+  if (candidateProof === undefined) {
+    const release = await loadDailyRelease(env);
+    if (release) {
+      assertIdentity(codeRevision, release.codeRevision);
+      await assertDailyReleaseBindings(env, release);
+      return null;
+    }
+  }
   const approvalId = `active:${codeRevision}`;
   const readApproval = async (): Promise<EodCutoverEvidence | null> => {
     const stored = await env.OPS_DB!.prepare("SELECT evidence_json FROM eod_rollout_evidence WHERE id=?").bind(approvalId).first<{evidence_json:string}>();

@@ -26,6 +26,24 @@ function publications(): EodPublicationStatus {
 }
 const view = (changes: Partial<Parameters<typeof buildEodRecoveryView>[0]> = {}) => buildEodRecoveryView({ recovery: recovery(), publications: publications(), now, ...changes });
 
+test("cloud delivery needs no local controller and uses configured Paid quota limits", () => {
+  const data = publications();
+  data.budget = { profile: "paid", usageDate: "2026-09-15", daily: null, unavailableReason: null,
+    limits: { eodDaily: { reads: 1_000_000_000, writes: 8_000_000 }, accountDaily: { reads: 1_500_000_000, writes: 10_000_000 },
+      rolling31: { reads: 20_000_000_000, writes: 35_000_000 }, runtime: { httpCpuMs: 1000, coordinatorCpuMs: 1000, queriesPerInvocation: 300, queryDurationMs: 30_000 } },
+    rolling31: { windowStart: "2026-08-16", windowEnd: "2026-09-15", sampledAt: checkedAt, rowsRead: 10_000_000,
+      rowsWritten: 100_000, reservedReads: 0, reservedWrites: 0 } };
+  Object.assign(data.monitoring!.currentHealth!.quota!, { eodRowsRead: 5_000_000, accountRowsRead: 6_000_000 });
+  data.dailyOperation = { codeRevision: activationRevision, approvedAt: checkedAt, hotSessions: 90,
+    storage: { status: "ready", checkedAt, accountBytes: 1_400_000_000, marketBytes: 140_000_000, historyBytes: 170_000_000,
+      limits: { accountWarningBytes: 3_500_000_000, accountOptionalStopBytes: 4_500_000_000 } }, maintenance: null };
+  const status = recovery(); status.configuration.status = "pending";
+  assert.equal(view({ recovery: status, publications: data }).computerNeeded, "no");
+  assert.equal(view({ recovery: status, publications: data }).currentHealth, "passed");
+  data.budget.rolling31!.rowsWritten = 35_000_001;
+  assert.equal(view({ publications: data }).currentHealth, "unverified");
+});
+
 test("no data stays pending without an observation requirement or invented health", () => {
   const result = view({ recovery: null, publications: null });
   assert.equal(result.status, "pending"); assert.equal(result.requiredSessions, 0); assert.equal(result.monitoringCount, null);

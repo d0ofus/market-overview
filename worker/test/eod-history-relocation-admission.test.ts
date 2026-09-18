@@ -17,6 +17,6 @@ describe("bounded relocation admission", () => {
   });
   it("reserves the full compact catalog traversal, even when callers request a small subset", () => {
     expect(estimateEodQueries([{ sql: "WITH publication AS MATERIALIZED (SELECT 1) SELECT * FROM publication /* eod-history-catalog-read */",
-      params: ["2026-09-04", '["AAA"]'] }])).toEqual({ reads: 50_000, writes: 0 });
+      params: ["2026-09-04", '["AAA"]'] }])).toEqual({ reads: 150_000, writes: 0 });
   });
 });

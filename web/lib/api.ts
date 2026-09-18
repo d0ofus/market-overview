@@ -9,6 +9,13 @@ export type EodMonitoredSession = {
 
 export type EodPublicationStatus = {
   mode: string;
+  dailyOperation?: {
+    codeRevision: string; approvedAt: string; hotSessions: number;
+    storage: { status: string; checkedAt: string | null; accountBytes: number | null; marketBytes: number | null; historyBytes: number | null;
+      limits: { accountWarningBytes: number; accountOptionalStopBytes: number } };
+    maintenance: { sessionDate: string; updatedAt: string; completedAt: string | null; startedAt: string;
+      deletedRows: number; archivedRows: number; deferredRepairCount: number; pending: boolean } | null;
+  } | null;
   budget?: {
     profile: "free" | "paid";
     limits: {

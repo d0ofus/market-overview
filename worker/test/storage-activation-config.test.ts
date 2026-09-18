@@ -4,7 +4,12 @@ import { parse } from "smol-toml";
 import { describe, expect, it } from "vitest";
 import { buildStorageActivationConfig } from "../scripts/storage-activation-config";
 
-const workerDirectory = resolve(import.meta.dirname, ".."), trackedToml = readFileSync(resolve(workerDirectory, "wrangler.toml"), "utf8");
+const workerDirectory = resolve(import.meta.dirname, ".."), currentToml = readFileSync(resolve(workerDirectory, "wrangler.toml"), "utf8");
+// This helper models the old shadow-to-active transition. Production is now
+// active, so explicitly construct its historical source-mode fixture.
+const trackedToml = currentToml.replace('EOD_RUNNER_MODE = "active"','EOD_RUNNER_MODE = "shadow"')
+  .replace('EOD_READ_ENABLED = "true"','EOD_READ_ENABLED = "false"')
+  .replace('EOD_ARCHIVE_PRUNE_ENABLED = "true"','EOD_ARCHIVE_PRUNE_ENABLED = "false"');
 const original = parse(trackedToml) as Record<string, unknown>;
 const dbs = original.d1_databases as Array<{ binding: string; database_id: string }>;
 const database = (name: string) => dbs.find((row) => row.binding === name)!.database_id;
@@ -22,7 +27,7 @@ describe("exact production activation configuration", () => {
     const actual = config.d1_databases as Array<Record<string, unknown>>;
     expect(actual.find((row) => row.binding === "MARKET_DATA_DB")).toMatchObject({ database_id: input.identity.targetDatabaseId, database_name: input.targetDatabaseName });
     for (const row of actual.filter((row) => row.binding !== "MARKET_DATA_DB")) expect(row.database_id).toBe(database(String(row.binding)));
-    expect(readFileSync(resolve(workerDirectory, "wrangler.toml"), "utf8")).toBe(trackedToml);
+    expect(readFileSync(resolve(workerDirectory, "wrangler.toml"), "utf8")).toBe(currentToml);
   });
   it("rebases entry point and every migration directory for a temporary config", () => {
     const { config } = buildStorageActivationConfig(input);

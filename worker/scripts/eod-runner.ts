@@ -8,6 +8,7 @@ import { reconcileEodAccountUsage } from "../src/eod-account-usage";
 import { assertEodCutover } from "../src/eod-rollout-service";
 import { finalizeRecentEodUsage, collectEodRolloutMonitoring } from "../src/eod-rollout-monitor";
 import { eodStorageWriterDisposition } from "../src/eod-storage-writer-guard";
+import { sampleDailyStorage, loadDailyRelease } from "../src/eod-daily-release";
 
 function required(name:string):string {
   const value=process.env[name]?.trim();
@@ -68,6 +69,7 @@ async function main() {
       throw error;
     }
     await finalizeRecentEodUsage({accountId,token:process.env.CLOUDFLARE_EOD_ANALYTICS_TOKEN || token,ops:env.OPS_DB!});
+    if (await loadDailyRelease(env)) await sampleDailyStorage({accountId,token,ops:env.OPS_DB!});
     const outcome=await runEodBatch(env,runId,failureDb);
     console.log(JSON.stringify({runId,status:outcome.status,publications:outcome.published.length}));
     if (outcome.status==="retrying") process.exitCode=1;

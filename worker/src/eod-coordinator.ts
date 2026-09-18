@@ -12,6 +12,7 @@ import { coordinateStorageMigration } from "./market-storage-scheduler";
 import { readEodRolloutMonitoring } from "./eod-rollout-monitor";
 import { loadStorageHistoryCapacityStatus } from "./eod-storage-history-capacity";
 import { registerEodRecoveryRoutes } from "./eod-recovery-status";
+import { dailyOperationStatus } from "./eod-daily-release";
 import { EOD_PUBLICATION_SCOPES } from "./eod-publication-scopes";
 export { EOD_PUBLICATION_SCOPES } from "./eod-publication-scopes";
 
@@ -233,6 +234,17 @@ export async function dispatchEodRun(env: Env, run: EodRun, now = new Date()): P
   const timestamp = now.toISOString();
   if (run.status === "completed" || (run.lease_until && run.lease_until > timestamp)
     || (run.next_attempt_at && run.next_attempt_at > timestamp)) return;
+  if (run.purpose === "maintenance") {
+    const local = zonedParts(now,"America/New_York");
+    // Maintenance cannot queue in front of an EOD job or occupy the close
+    // window. Unfinished retention resumes the next morning with its cursor.
+    if (local.minutesOfDay < 7*60 || local.minutesOfDay >= 9*60) return;
+    const expected = await expectedEodSession(env, now);
+    const priority = await getOpsDb(env).prepare(`SELECT id FROM eod_runs WHERE mode=? AND purpose IN ('daily','reconcile')
+      AND status IN ('queued','retrying','dispatching','dispatched','running')
+      AND session_date=? AND (next_attempt_at IS NULL OR next_attempt_at<=?) LIMIT 1`).bind(env.EOD_RUNNER_MODE,expected,timestamp).first();
+    if (priority) return;
+  }
   // Admin retries may clear next_attempt_at; the session close gate still
   // applies independently of retry state, including future backfill requests.
   if (run.deadline_at && now.getTime() < Date.parse(run.deadline_at) - 100 * 60_000) return;
@@ -381,22 +393,25 @@ export async function coordinateEod(env: Env, now = new Date()): Promise<void> {
         .bind(local.localDate).first<{date:string}>();
       if (previous) await dispatchEodRun(env,await enqueueEodRun(env,previous.date,"reconcile",now),now);
     }
-  } else if (local.weekday === "Sat" && local.minutesOfDay >= 9*60 && local.minutesOfDay < 10*60) {
+  }
+  if (local.minutesOfDay >= 7*60 && local.minutesOfDay < 8*60) {
     const previous = await db.prepare("SELECT session_date as date FROM market_calendar_sessions WHERE session_date<? ORDER BY session_date DESC LIMIT 1")
       .bind(local.localDate).first<{date:string}>();
     if (previous) await dispatchEodRun(env,await enqueueEodRun(env,previous.date,"maintenance",now),now);
   }
   // Date-matching publications can still contain superseded values. The input
   // clock catches changes by any writer without polling full ticker manifests.
-  await scheduleEodInputCorrections(env,await expectedEodSession(env,now),now);
+  const expected = await expectedEodSession(env,now);
+  await scheduleEodInputCorrections(env,expected,now);
   // A missed runner or an exhausted UTC allowance must recover even when the
   // original close window has ended. Prioritize the newest unfinished session.
   const due=await getOpsDb(env).prepare(`SELECT * FROM eod_runs WHERE mode=?
     AND status IN ('queued','retrying','dispatching','dispatched','running')
     AND (lease_until IS NULL OR lease_until<=?) AND (next_attempt_at IS NULL OR next_attempt_at<=?)
     AND (session_date<? OR purpose<>'daily' OR deadline_at<=?)
-    ORDER BY session_date DESC,CASE purpose WHEN 'daily' THEN 0 WHEN 'reconcile' THEN 1 ELSE 2 END LIMIT 1`)
-    .bind(env.EOD_RUNNER_MODE,now.toISOString(),now.toISOString(),local.localDate,now.toISOString()).first<EodRun>();
+    AND (purpose IN ('maintenance','backfill') OR session_date=?)
+    ORDER BY CASE purpose WHEN 'daily' THEN 0 WHEN 'reconcile' THEN 1 ELSE 2 END,session_date DESC LIMIT 1`)
+    .bind(env.EOD_RUNNER_MODE,now.toISOString(),now.toISOString(),local.localDate,now.toISOString(),expected).first<EodRun>();
   if (due) await dispatchEodRun(env,due,now);
 }
 
@@ -408,6 +423,7 @@ function objectJson(value: string | undefined): Record<string, unknown> {
 }
 
 export async function eodStatus(env: Env, now = new Date()) {
+  const dailyOperation = await dailyOperationStatus(env, now);
   const budget=await readEodBudgetStatus(env.OPS_DB,resolveEodBudgetProfile(env.EOD_BUDGET_PROFILE),now);
   const storageMigration=await publicStorageMigrationStatus(env);
   const monitoring=env.OPS_DB ? await readEodRolloutMonitoring(env,now) : null;
@@ -460,7 +476,7 @@ export async function eodStatus(env: Env, now = new Date()) {
   const unfinished=publicRuns.filter((run) => run.status!=="completed");
   const quotaBlocked=unfinished.some((run) => /budget|quota/i.test(`${run.error_code} ${run.error_message}`));
   const capacityBlocked=unfinished.some((run) => /capacity/i.test(`${run.error_code} ${run.error_message}`));
-  return {mode:env.EOD_RUNNER_MODE,pipelineMode,storageMigration,monitoring,storageCapacity,budget,expectedSession,runs:publicRuns,publications:publications.results,usage,accountUsage,...corrections,
+  return {mode:env.EOD_RUNNER_MODE,pipelineMode,storageMigration,monitoring,storageCapacity,dailyOperation,budget,expectedSession,runs:publicRuns,publications:publications.results,usage,accountUsage,...corrections,
     missingScopes,lastSuccessfulSession:lastComplete?.date ?? null,
     scopeHealth:EOD_PUBLICATION_SCOPES.map((scope) => {
       const head=publications.results.find((row) => row.scope===scope);

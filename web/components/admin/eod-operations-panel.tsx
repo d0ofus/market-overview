@@ -108,11 +108,23 @@ export function EodOperationsPanel() {
             <p className="mt-1 text-slate-400">Daily EOD limits: {count(data.budget.limits.eodDaily.reads)} reads / {count(data.budget.limits.eodDaily.writes)} writes. Account limits: {count(data.budget.limits.accountDaily.reads)} reads / {count(data.budget.limits.accountDaily.writes)} writes.</p>
             {data.budget.limits.rolling31 ? <>
               <p className="text-slate-400">Account usage over 31 UTC days: {count(data.budget.rolling31?.rowsRead)} / {count(data.budget.limits.rolling31.reads)} reads; {count(data.budget.rolling31?.rowsWritten)} / {count(data.budget.limits.rolling31.writes)} writes.</p>
-              <p className="text-xs text-slate-500">Admission also includes outstanding reservations. These operating limits preserve headroom; Cloudflare billing remains account-wide. Storage retains the Free-compatible archive layout.</p>
+              <p className="text-xs text-slate-500">Admission includes outstanding reservations. Cloudflare billing remains account-wide. A future Free downgrade requires a separate storage and usage check.</p>
             </> : null}
             {data.budget.unavailableReason ? <p className="text-amber-300">Budget check: {data.budget.unavailableReason}</p> : null}
           </div> : null}
-          {data.storageMigration ? <div className="rounded-xl border border-borderSoft/70 p-3 text-sm">
+          {data.dailyOperation ? <div className="rounded-xl border border-borderSoft/70 p-3 text-sm">
+            <p className="font-semibold">Daily operation configured</p>
+            <p className="text-slate-400">Release {data.dailyOperation.codeRevision.slice(0,7)}. Recent prices: {data.dailyOperation.hotSessions} sessions; older history remains archived.</p>
+            <p className="text-slate-400">Account storage: {count(data.dailyOperation.storage.accountBytes)} bytes ({data.dailyOperation.storage.status}). Checked {timestamp(data.dailyOperation.storage.checkedAt)}.</p>
+            <p className="text-slate-400">Recent-price database: {count(data.dailyOperation.storage.marketBytes)} bytes; archive: {count(data.dailyOperation.storage.historyBytes)} bytes.</p>
+            <p className="text-slate-400">Retention runs at 07:00 New York time. No provider history expansion or observation period is required.</p>
+            {data.dailyOperation.maintenance ? <>
+              <p className="mt-1 font-medium">Retention: {data.dailyOperation.maintenance.pending ? "In progress / awaiting retry" : "Completed"} for {data.dailyOperation.maintenance.sessionDate}</p>
+              <p className="text-slate-400">Verified rows archived: {count(data.dailyOperation.maintenance.archivedRows)}; recent rows safely removed: {count(data.dailyOperation.maintenance.deletedRows)}. Securities deferred for repair: {count(data.dailyOperation.maintenance.deferredRepairCount)}.</p>
+              <p className="text-slate-400">Updated {timestamp(data.dailyOperation.maintenance.updatedAt)}; completed {timestamp(data.dailyOperation.maintenance.completedAt)}.</p>
+            </> : <p className="text-amber-300">The first retention cycle has not completed.</p>}
+          </div> : null}
+          {data.storageMigration && !data.dailyOperation ? <div className="rounded-xl border border-borderSoft/70 p-3 text-sm">
             <p className="font-semibold">Storage migration: {data.storageMigration.status}</p>
             <p className="mt-1 text-slate-400">Stage: {data.storageMigration.failedStage ?? data.storageMigration.stage} · Session: {data.storageMigration.sessionDate}</p>
             <p className="text-slate-400">Archived rows: {count(data.storageMigration.archivedRows)} · Current table rows copied: {count(data.storageMigration.copiedRows)}</p>
