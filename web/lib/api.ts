@@ -3244,6 +3244,12 @@ export function updateSectorFocusNarratives(focusNarratives: SectorFocusNarrativ
   });
 }
 
+export function deleteSectorFocusNarrative(id: string) {
+  return adminFetch<{ ok: boolean; id: string }>(`/api/sectors/focus-narratives/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
 export function getSectorMarketLeaders() {
   return getJson<{ rows: SectorMarketLeaderRow[] }>("/api/sectors/market-leaders");
 }

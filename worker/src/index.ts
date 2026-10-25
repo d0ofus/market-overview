@@ -55,6 +55,7 @@ import {
   configPatchSchema,
   correlationMatrixQuerySchema,
   correlationPairQuerySchema,
+  sectorFocusNarrativeIdSchema,
   groupPatchSchema,
   itemCreateSchema,
   itemPatchSchema,
@@ -177,6 +178,7 @@ import { classifyScheduledCron, createScheduledBudget, scheduledLanesForCron, ty
 import { legacyRsCacheRetired } from "./rs-state-v2-service";
 import { finishScheduledJobRun, startScheduledJobRun } from "./scheduled-job-audit";
 import {
+  deleteFocusNarrative,
   deriveFocusNarrativeName,
   FocusNarrativeValidationError,
   normalizeFocusTickers,
@@ -3254,6 +3256,22 @@ app.get("/api/sectors/focus-narratives", async (c) => {
       selectedTickers: symbolsByFocusId.get(String(row.id)) ?? [],
     })),
   });
+});
+
+app.delete("/api/sectors/focus-narratives/:id", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const parsed = sectorFocusNarrativeIdSchema.safeParse(c.req.param("id"));
+  if (!parsed.success) return c.json({ error: "Focus narrative ID is required." }, 400);
+
+  try {
+    await deleteFocusNarrative(c.env.DB, parsed.data);
+    return c.json({ ok: true, id: parsed.data });
+  } catch (error) {
+    if (error instanceof FocusNarrativeValidationError) {
+      return c.json({ error: error.message }, error.status);
+    }
+    throw error;
+  }
 });
 
 app.put("/api/sectors/focus-narratives", async (c) => {

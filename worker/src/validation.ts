@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const sectorFocusNarrativeIdSchema = z.string().trim().min(1);
+
 export const eodEnqueueSchema = z.object({
   sessionDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   purpose: z.enum(["daily", "reconcile", "backfill", "maintenance"]).default("daily"),

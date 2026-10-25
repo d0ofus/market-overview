@@ -27,6 +27,18 @@ export class FocusNarrativeValidationError extends Error {
   }
 }
 
+export async function deleteFocusNarrative(db: D1Database, id: string): Promise<void> {
+  const existing = await db.prepare("SELECT id FROM sector_focus_narratives WHERE id = ? LIMIT 1")
+    .bind(id)
+    .first<{ id: string }>();
+  if (!existing) throw new FocusNarrativeValidationError("Focus narrative not found.", 404);
+
+  await db.batch([
+    db.prepare("DELETE FROM sector_focus_narrative_symbols WHERE focus_narrative_id = ?").bind(id),
+    db.prepare("DELETE FROM sector_focus_narratives WHERE id = ?").bind(id),
+  ]);
+}
+
 export function normalizeFocusTickers(values: unknown): string[] {
   if (!Array.isArray(values)) return [];
   return Array.from(new Set(

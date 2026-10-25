@@ -7,6 +7,7 @@ import {
   addSectorMarketLeaders,
   adminFetch,
   deleteSectorEntry,
+  deleteSectorFocusNarrative,
   deleteSectorMarketLeader,
   getEtfConstituents,
   getIndustryEtfs,
@@ -1212,17 +1213,28 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
     if (saved) setFocusEditor(null);
   };
 
-  const removeFocusNarrative = async (sectorName: string) => {
+  const removeFocusNarrative = async (id: string) => {
     if (focusNarrativeSaving) return;
-    if (activeNarrativeCollection?.mode === "focus" && activeNarrativeCollection.sectorName === sectorName) {
-      setActiveNarrativeCollection(null);
+    const row = focusNarrativeRows.find((item) => item.id === id);
+    if (!row) return;
+    const previousFocusNarratives = focusNarratives;
+    setFocusNarrativeSaving(true);
+    setFocusNarrativeError(null);
+    setFocusNarratives(focusNarrativeRows.filter((item) => item.id !== id));
+    try {
+      await deleteSectorFocusNarrative(id);
+      setActiveNarrativeCollection((current) => current?.mode === "focus" && current.id === id ? null : current);
+      setFocusEditor((current) => current?.entry?.id === id ? null : current);
+      if (editingFocusComment === row.sectorName) {
+        setEditingFocusComment(null);
+        setFocusCommentDraft("");
+      }
+    } catch (err) {
+      setFocusNarratives(previousFocusNarratives);
+      setFocusNarrativeError(err instanceof Error ? err.message : "Failed to delete focus narrative.");
+    } finally {
+      setFocusNarrativeSaving(false);
     }
-    if (editingFocusComment === sectorName) {
-      setEditingFocusComment(null);
-      setFocusCommentDraft("");
-    }
-    const nextRows = focusNarrativeRows.filter((row) => row.sectorName !== sectorName);
-    await persistFocusNarratives(nextRows.map(focusRowToUpdate), { optimisticRows: nextRows });
   };
 
   const persistFocusNarrativeOrder = async (sectorNames: string[]) => {
@@ -1741,7 +1753,7 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
                             <button
                               type="button"
                               className="flex w-9 shrink-0 items-center justify-center border-l border-borderSoft/60 text-slate-400 transition hover:bg-red-500/10 hover:text-red-300 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-red-400/30 disabled:cursor-not-allowed disabled:opacity-50"
-                              onClick={() => void removeFocusNarrative(row.sectorName)}
+                              onClick={() => void removeFocusNarrative(row.id)}
                               disabled={focusNarrativeSaving}
                               aria-label={`Remove ${row.sectorName} from focus narratives`}
                               title="Remove"
