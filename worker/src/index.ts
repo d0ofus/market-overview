@@ -55,6 +55,7 @@ import {
   configPatchSchema,
   correlationMatrixQuerySchema,
   correlationPairQuerySchema,
+  sectorFocusNarrativeCreateSchema,
   sectorFocusNarrativeIdSchema,
   groupPatchSchema,
   itemCreateSchema,
@@ -178,6 +179,7 @@ import { classifyScheduledCron, createScheduledBudget, scheduledLanesForCron, ty
 import { legacyRsCacheRetired } from "./rs-state-v2-service";
 import { finishScheduledJobRun, startScheduledJobRun } from "./scheduled-job-audit";
 import {
+  createFocusNarrative,
   deleteFocusNarrative,
   deriveFocusNarrativeName,
   FocusNarrativeValidationError,
@@ -3256,6 +3258,22 @@ app.get("/api/sectors/focus-narratives", async (c) => {
       selectedTickers: symbolsByFocusId.get(String(row.id)) ?? [],
     })),
   });
+});
+
+app.post("/api/sectors/focus-narratives", async (c) => {
+  if (!isAuthed(c.req.raw, c.env)) return c.json({ error: "Unauthorized" }, 401);
+  const parsed = sectorFocusNarrativeCreateSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: parsed.error.issues[0]?.message ?? "Invalid Focus Now entry." }, 400);
+
+  try {
+    const row = await createFocusNarrative(c.env.DB, parsed.data);
+    return c.json({ row }, 201);
+  } catch (error) {
+    if (error instanceof FocusNarrativeValidationError) {
+      return c.json({ error: error.message }, error.status);
+    }
+    throw error;
+  }
 });
 
 app.delete("/api/sectors/focus-narratives/:id", async (c) => {

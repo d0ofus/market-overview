@@ -3237,6 +3237,14 @@ export function getSectorFocusNarratives() {
   return getJson<{ rows: SectorFocusNarrative[] }>("/api/sectors/focus-narratives");
 }
 
+export function createSectorFocusNarrative(value: Omit<SectorFocusNarrativeUpdate, "id">) {
+  const { sectorName, sourceNarrativeName, sourcePeerGroupId, manualName, selectedTickers, comment } = value;
+  return adminFetch<{ row: SectorFocusNarrative }>("/api/sectors/focus-narratives", {
+    method: "POST",
+    body: JSON.stringify({ sectorName, sourceNarrativeName, sourcePeerGroupId, manualName, selectedTickers, comment }),
+  });
+}
+
 export function updateSectorFocusNarratives(focusNarratives: SectorFocusNarrativeUpdate[]) {
   return adminFetch<{ rows: SectorFocusNarrative[] }>("/api/sectors/focus-narratives", {
     method: "PUT",

@@ -6,6 +6,7 @@ import { CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, GripVertic
 import {
   addSectorMarketLeaders,
   adminFetch,
+  createSectorFocusNarrative,
   deleteSectorEntry,
   deleteSectorFocusNarrative,
   deleteSectorMarketLeader,
@@ -1206,11 +1207,24 @@ export function SectorTracker({ navActions }: SectorTrackerProps = {}) {
   const saveFocusEditorEntry = async (value: SectorFocusNarrativeUpdate) => {
     if (focusNarrativeSaving) return;
     const existingId = focusEditor?.entry?.id;
-    const payload = existingId
-      ? focusNarrativeRows.map((row) => row.id === existingId ? value : focusRowToUpdate(row))
-      : [...focusNarrativeRows.map(focusRowToUpdate), value];
-    const saved = await persistFocusNarratives(payload);
-    if (saved) setFocusEditor(null);
+    if (existingId) {
+      const payload = focusNarrativeRows.map((row) => row.id === existingId ? value : focusRowToUpdate(row));
+      const saved = await persistFocusNarratives(payload);
+      if (saved) setFocusEditor(null);
+      return;
+    }
+
+    setFocusNarrativeSaving(true);
+    setFocusNarrativeError(null);
+    try {
+      const { row } = await createSectorFocusNarrative(value);
+      setFocusNarratives((current) => [...current, row]);
+      setFocusEditor(null);
+    } catch (err) {
+      setFocusNarrativeError(err instanceof Error ? err.message : "Failed to add Focus Now entry.");
+    } finally {
+      setFocusNarrativeSaving(false);
+    }
   };
 
   const removeFocusNarrative = async (id: string) => {

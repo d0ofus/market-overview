@@ -2,6 +2,17 @@ import { z } from "zod";
 
 export const sectorFocusNarrativeIdSchema = z.string().trim().min(1);
 
+export const sectorFocusNarrativeCreateSchema = z.object({
+  sectorName: z.string(),
+  sourceNarrativeName: z.string().trim().nullish().transform((value) => value || null),
+  sourcePeerGroupId: z.string().trim().nullish().transform((value) => value || null),
+  manualName: z.string().trim().max(120).nullish().transform((value) => value || null),
+  selectedTickers: z.array(z.string()),
+  comment: z.string().transform((value) => value.trim().slice(0, 1000)).default(""),
+});
+
+export type SectorFocusNarrativeCreateInput = z.infer<typeof sectorFocusNarrativeCreateSchema>;
+
 export const eodEnqueueSchema = z.object({
   sessionDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   purpose: z.enum(["daily", "reconcile", "backfill", "maintenance"]).default("daily"),
